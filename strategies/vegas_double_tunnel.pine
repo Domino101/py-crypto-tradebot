@@ -1,0 +1,230 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © Gilbert0967
+
+//@version=5
+strategy(title = "vegas Double tunnel test",shorttitle = "vegas Double tunnel test", overlay = true, initial_capital = 1000, default_qty_type = strategy.cash, default_qty_value = 2000)
+//MA1
+MA1Period = input.int(title='MA1 Period', defval=144, minval=1)
+MA1Type = input.string(title='MA1 Type', defval='EMA', options=['SMA', 'EMA', 'WMA', 'RMA'])
+MA1Source = input(title='MA1 Source', defval=close)
+MA1Visible = input(title='MA1 Visible', defval=true)
+
+//MA2
+MA2Period = input.int(title='MA2 Period', defval=169, minval=1)
+MA2Type = input.string(title='MA2 Type', defval='EMA', options=['SMA', 'EMA', 'WMA', 'RMA'])
+MA2Source = input(title='MA2 Source', defval=close)
+MA2Visible = input(title='MA2 Visible', defval=true)
+
+//MA3
+MA3Period = input.int(title='MA3 Period', defval=576, minval=1)
+MA3Type = input.string(title='MA3 Type', defval='EMA', options=['SMA', 'EMA', 'WMA', 'RMA'])
+MA3Source = input(title='MA3 Source', defval=close)
+MA3Visible = input(title='MA3 Visible', defval=true)
+
+//MA4
+MA4Period = input.int(title='MA4 Period', defval=676, minval=1)
+MA4Type = input.string(title='MA4 Type', defval='EMA', options=['SMA', 'EMA', 'WMA', 'RMA'])
+MA4Source = input(title='MA4 Source', defval=close)
+MA4Visible = input(title='MA4 Visible', defval=true)
+
+//MA5
+MA5Period = input.int(title='MA5 Period', defval=14, minval=1)
+MA5Type = input.string(title='MA5 Type', defval='EMA', options=['SMA', 'EMA', 'WMA', 'RMA'])
+MA5Source = input(title='MA5 Source', defval=close)
+MA5Visible = input(title='MA5 Visible', defval=true)
+
+
+ShowCrosses = input(title='Show Crosses', defval=false)
+//MA1 is series type
+MA1 = if MA1Type == 'SMA'
+    ta.sma(MA1Source, MA1Period)
+else
+    if MA1Type == 'EMA'
+        ta.ema(MA1Source, MA1Period)
+    else
+        if MA1Type == 'WMA'
+            ta.wma(MA1Source, MA1Period)
+        else
+            if MA1Type == 'RMA'
+                ta.rma(MA1Source, MA1Period)
+
+MA2 = if MA2Type == 'SMA'
+    ta.sma(MA2Source, MA2Period)
+else
+    if MA2Type == 'EMA'
+        ta.ema(MA2Source, MA2Period)
+    else
+        if MA2Type == 'WMA'
+            ta.wma(MA2Source, MA2Period)
+        else
+            if MA2Type == 'RMA'
+                ta.rma(MA2Source, MA2Period)
+
+MA3 = if MA3Type == 'SMA'
+    ta.sma(MA3Source, MA3Period)
+else
+    if MA3Type == 'EMA'
+        ta.ema(MA3Source, MA3Period)
+    else
+        if MA3Type == 'WMA'
+            ta.wma(MA3Source, MA3Period)
+        else
+            if MA3Type == 'RMA'
+                ta.rma(MA3Source, MA3Period)
+
+MA4 = if MA4Type == 'SMA'
+    ta.sma(MA4Source, MA4Period)
+else
+    if MA4Type == 'EMA'
+        ta.ema(MA4Source, MA4Period)
+    else
+        if MA4Type == 'WMA'
+            ta.wma(MA4Source, MA4Period)
+        else
+            if MA4Type == 'RMA'
+                ta.rma(MA4Source, MA4Period)
+
+MA5 = if MA5Type == 'SMA'
+    ta.sma(MA5Source, MA5Period)
+else
+    if MA5Type == 'EMA'
+        ta.ema(MA5Source, MA5Period)
+    else
+        if MA5Type == 'WMA'
+            ta.wma(MA5Source, MA5Period)
+        else
+            if MA5Type == 'RMA'
+                ta.rma(MA5Source, MA5Period)
+//12
+if ShowCrosses and MA1Visible and MA2Visible and ta.crossunder(MA1, MA2)
+    lun1 = label.new(bar_index, na, str.tostring(MA1Period) + '' + MA1Type + 'crossed under' + str.tostring(MA2Period) + '' + MA2Type, color=color.red, textcolor=color.red, style=label.style_arrowdown, size=size.small)
+    label.set_y(lun1, MA1)
+if ShowCrosses and MA1Visible and MA2Visible and ta.crossover(MA1, MA2)
+    lun1 = label.new(bar_index, na, str.tostring(MA1Period) + '' + MA1Type + 'crossed over' + str.tostring(MA2Period) + '' + MA2Type, color=color.green, textcolor=color.green, style=label.style_arrowup, size=size.small)
+    label.set_y(lun1, MA2)
+//13
+if ShowCrosses and MA1Visible and MA3Visible and ta.crossunder(MA1, MA3)
+    lun1 = label.new(bar_index, na, str.tostring(MA1Period) + '' + MA1Type + 'crossed under' + str.tostring(MA3Period) + '' + MA3Type, color=color.red, textcolor=color.red, style=label.style_arrowdown, size=size.small)
+    label.set_y(lun1, MA1)
+if ShowCrosses and MA1Visible and MA3Visible and ta.crossover(MA1, MA3)
+    lun1 = label.new(bar_index, na, str.tostring(MA1Period) + '' + MA1Type + 'crossed over' + str.tostring(MA3Period) + '' + MA3Type, color=color.green, textcolor=color.green, style=label.style_arrowup, size=size.small)
+    label.set_y(lun1, MA1)
+//14
+if ShowCrosses and MA1Visible and MA4Visible and ta.crossunder(MA1, MA4)
+    lun1 = label.new(bar_index, na, str.tostring(MA1Period) + '' + MA1Type + 'crossed under' + str.tostring(MA4Period) + '' + MA4Type, color=color.red, textcolor=color.red, style=label.style_arrowdown, size=size.small)
+    label.set_y(lun1, MA1)
+if ShowCrosses and MA1Visible and MA4Visible and ta.crossover(MA1, MA4)
+    lun1 = label.new(bar_index, na, str.tostring(MA1Period) + '' + MA1Type + 'crossed over' + str.tostring(MA4Period) + '' + MA4Type, color=color.green, textcolor=color.green, style=label.style_arrowup, size=size.small)
+    label.set_y(lun1, MA1)
+//23
+if ShowCrosses and MA2Visible and MA3Visible and ta.crossunder(MA2, MA3)
+    lun1 = label.new(bar_index, na, str.tostring(MA2Period) + '' + MA2Type + 'crossed under' + str.tostring(MA3Period) + '' + MA3Type, color=color.red, textcolor=color.red, style=label.style_arrowdown, size=size.small)
+    label.set_y(lun1, MA2)
+if ShowCrosses and MA2Visible and MA3Visible and ta.crossover(MA2, MA3)
+    lun1 = label.new(bar_index, na, str.tostring(MA2Period) + '' + MA2Type + 'crossed over' + str.tostring(MA3Period) + '' + MA3Type, color=color.green, textcolor=color.green, style=label.style_arrowup, size=size.small)
+    label.set_y(lun1, MA2)
+//24
+if ShowCrosses and MA2Visible and MA4Visible and ta.crossunder(MA2, MA4)
+    lun1 = label.new(bar_index, na, str.tostring(MA2Period) + '' + MA2Type + 'crossed under' + str.tostring(MA4Period) + '' + MA4Type, color=color.red, textcolor=color.red, style=label.style_arrowdown, size=size.small)
+    label.set_y(lun1, MA2)
+if ShowCrosses and MA2Visible and MA4Visible and ta.crossover(MA2, MA4)
+    lun1 = label.new(bar_index, na, str.tostring(MA2Period) + '' + MA2Type + 'crossed over' + str.tostring(MA4Period) + '' + MA4Type, color=color.green, textcolor=color.green, style=label.style_arrowup, size=size.small)
+    label.set_y(lun1, MA2)
+//34
+if ShowCrosses and MA3Visible and MA4Visible and ta.crossunder(MA3, MA4)
+    lun1 = label.new(bar_index, na, str.tostring(MA3Period) + '' + MA3Type + 'crossed under' + str.tostring(MA4Period) + '' + MA4Type, color=color.red, textcolor=color.red, style=label.style_arrowdown, size=size.small)
+    label.set_y(lun1, MA3)
+if ShowCrosses and MA3Visible and MA4Visible and ta.crossover(MA3, MA4)
+    lun1 = label.new(bar_index, na, str.tostring(MA3Period) + '' + MA3Type + 'crossed over' + str.tostring(MA4Period) + '' + MA4Type, color=color.green, textcolor=color.green, style=label.style_arrowup, size=size.small)
+    label.set_y(lun1, MA3)
+
+plot(MA1Visible ? MA1 : na, color=color.new(color.purple, 0), linewidth=2)
+plot(MA2Visible ? MA2 : na, color=color.new(color.fuchsia, 0), linewidth=2)
+plot(MA3Visible ? MA3 : na, color=color.new(color.white, 0), linewidth=2)
+plot(MA4Visible ? MA4 : na, color=color.new(color.silver, 0), linewidth=2)
+plot(MA5Visible ? MA5 : na, color= color.yellow, linewidth = 1)
+
+//add order template
+
+multiple_take_profit = input.bool(defval = false, title = "Multiple Take Profit")
+stoploss_long = input.float(defval = 1,title = "stoploss_long(%)")
+stoploss_short =  input.float(defval = 1,title = "stoploss_short(%)")
+takeProfit_long1  = input.float(defval = 1,title = "takeProfit_long1(%)")
+takeProfit_long2  = input.float(defval = 2,title = "takeProfit_long2(%)")
+takeProfit_long3  = input.float(defval = 3,title = "takeProfit_long3(%)")
+takeProfit_long4  = input.float(defval = 4,title = "takeProfit_long4(%)")
+
+takeProfit_short1 = input.float(defval = 1,title = "takeProfit_short1(%)")
+takeProfit_short2  = input.float(defval = 2,title = "takeProfit_short2(%)")
+takeProfit_short3  = input.float(defval = 3,title = "takeProfit_short3(%)")
+takeProfit_short4  = input.float(defval = 4,title = "takeProfit_short4(%)")
+
+takeProfit_qty_percent1 = input.float(defval = 25, title = "takeProfit_qty_percent1")
+takeProfit_qty_percent2 = input.float(defval = 25, title = "takeProfit_qty_percent2")
+takeProfit_qty_percent3 = input.float(defval = 25, title = "takeProfit_qty_percent3")
+takeProfit_qty_percent4 = input.float(defval = 25, title = "takeProfit_qty_percent4")
+// 添加输入选项
+direction = input.string(defval="Both", title="Trading Direction", options=["Long Only","Short Only","Both"])
+
+enter_long_comment = input.string(defval = "", title = "enter_long_comment")
+enter_short_comment = input.string(defval = "", title = "enter_short_comment")
+exit_long_comment = input.string(defval = "", title = "exit_long_comment")
+exit_short_comment = input.string(defval = "", title = "exit_short_comment")
+// 添加全日交易或仅工作日交易的选项
+trading_days = input.string(defval="24/7", title="Trading Days", options=["24/7", "Weekdays Only"])
+
+// 交易条件
+buycondition = ta.crossover(MA1, MA3) and MA5 > ta.ema(close, 144)
+sellcondition = ta.crossunder(MA1, MA3) and MA5 < ta.ema(close, 144)
+
+// 定义交易时间
+var isTradingTime = true
+if trading_days == "Weekdays Only"
+    isTradingTime := not (dayofweek == dayofweek.saturday or dayofweek == dayofweek.sunday)
+
+
+if direction == "Both" or direction == "Long Only" and isTradingTime
+    if buycondition
+        var float entry_price_long = na
+        tp1 = close * (1 + takeProfit_long1 / 100)
+        tp2 = close * (1 + takeProfit_long2 / 100)
+        tp3 = close * (1 + takeProfit_long3 / 100)
+        tp4 = close * (1 + takeProfit_long4 / 100)
+
+        strategy.entry("long", strategy.long, comment = enter_long_comment)
+        entry_price_long := close
+        if multiple_take_profit
+            strategy.exit("tp1 long", "long", limit = tp1, qty_percent = takeProfit_qty_percent1)
+            strategy.exit("tp2 long", "long", limit = tp2, qty_percent = takeProfit_qty_percent2)
+            strategy.exit("tp3 long", "long", limit = tp3, qty_percent = takeProfit_qty_percent3)
+            strategy.exit("tp4 long", "long", limit = tp4, qty_percent = takeProfit_qty_percent4)
+        else
+            strategy.exit("tp long", "long", limit = tp1, comment = exit_long_comment)
+if direction == "Both" or direction == "Short Only" and isTradingTime
+    if sellcondition
+        var float entry_price_short = na
+        tp1 = close * (1 - takeProfit_short1 / 100)
+        tp2 = close * (1 - takeProfit_short2 / 100)
+        tp3 = close * (1 - takeProfit_short3 / 100)
+        tp4 = close * (1 - takeProfit_short4 / 100)
+
+        strategy.entry("short", strategy.short,comment = enter_short_comment)
+        entry_price_short := close
+        if multiple_take_profit
+            strategy.exit("tp1 short", "short",  limit = tp1, qty_percent = takeProfit_qty_percent1)
+            strategy.exit("tp2 short", "short",  limit = tp2, qty_percent = takeProfit_qty_percent2)
+            strategy.exit("tp3 short", "short",  limit = tp3, qty_percent = takeProfit_qty_percent3)
+            strategy.exit("tp4 short", "short",  limit = tp4, qty_percent = takeProfit_qty_percent4)
+        else
+            strategy.exit("tp1 short", "short", limit = tp1,comment = exit_short_comment)
+
+// Stop Loss
+if strategy.position_size > 0
+    stopLossPriceLong = strategy.position_avg_price * (1 - stoploss_long / 100)
+    if close < stopLossPriceLong
+        strategy.close("long", comment = "stoploss")
+
+if strategy.position_size < 0
+    stopLossPriceShort = strategy.position_avg_price * (1 + stoploss_short / 100)
+    if close > stopLossPriceShort
+        strategy.close("short", comment = "stoploss")
