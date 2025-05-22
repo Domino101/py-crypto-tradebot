@@ -305,9 +305,9 @@ class TradingAppGUI: # Renamed class for clarity
         elif os.path.exists(ip): # Check if existing is empty
              try:
                  if os.path.getsize(ip) > 0:
-                     print(f"警告: '{ip}' 文件不是空的，可能導致問題。正在清空...");
-                     with open(ip, 'w') as f: f.write("")
-             except Exception as e: print(f"警告: 無法檢查/清空 '{ip}': {e}")
+                     print(f"警告: '{ip}' 文件不是空的。如果此文件包含重要代碼，它可能影響策略或數據加載。請確保其內容是預期的。")
+                 # Removed the file clearing operation: with open(ip, 'w') as f: f.write("")
+             except Exception as e: print(f"警告: 無法檢查 '{ip}' 文件狀態: {e}")
         return True
 
     # --- GUI 更新與輔助函數 ---
