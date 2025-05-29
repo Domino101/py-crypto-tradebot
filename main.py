@@ -13,8 +13,10 @@ DEFAULT_THEME = "arc" # Example theme: arc, clam, adapta, etc.
 try:
     # Assuming gui/app.py contains the TradingAppGUI class (renamed from BacktestGUI)
     from gui.app import TradingAppGUI
+    # 可能需要添加Google API客戶端庫
+    import google.cloud.aiplatform as aiplatform
 except ImportError as e:
-    print(f"無法導入 GUI 應用程序: {e}")
+    print(f"無法導入必要組件: {e}")
     print("請確保 gui 文件夾和 gui/app.py 文件存在，並且所有依賴項已安裝。")
     # Try showing an error box if messagebox was imported
     try:

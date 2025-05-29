@@ -2,12 +2,12 @@
 
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
+import queue
 import pandas as pd
 import threading
 from datetime import datetime
 import os
 import importlib
-import queue
 import inspect
 import traceback
 import sys
@@ -15,7 +15,7 @@ import sys
 # --- Import components from other project modules ---
 try:
     from backtest.backtester import BacktestEngine
-    from data.binance import fetch_historical_data # Keep for backtest data download
+    from data.binance_utils import fetch_historical_data # Import from utility file
     # Import the strategy loader utility
     from utils.strategy_loader import load_available_strategies
     # Base class for type checking backtest strategies
@@ -23,137 +23,95 @@ try:
     # Import Live Trader components
     from live.trader import LiveTrader
     from strategies.live_rsi_ema import LiveRsiEmaStrategy # Example live strategy
-    # Import dotenv to load API keys from .env for live trading
-    from dotenv import load_dotenv
-    load_dotenv() # Load .env file at the start
+    from analysis.trend_analyzer import TrendAnalyzer
 except ImportError as e:
-    # Handle missing local modules or backtesting lib
-    print(f"FATAL: Error importing required modules for GUI: {e}")
-    print("Ensure backtest, data, utils, live, strategies modules and libraries (backtesting, dotenv) are accessible.")
-    # Cannot proceed without these, maybe raise or exit
-    raise # Re-raise to stop execution if core components missing
+    print(f"模組導入錯誤: {e}")
+    raise SystemExit("無法載入必要模組，請檢查依賴項是否安裝完成")
 
-# Helper (could also be in utils if used elsewhere)
-def get_metric(perf_metrics, key, fmt="{:.2f}"):
-    """Safely retrieves and formats a metric from the results dictionary."""
-    val = perf_metrics.get(key)
-    if val is None or (isinstance(val, float) and pd.isna(val)):
-        return 'N/A'
-    try:
-        if isinstance(val, (int, float)) and fmt: return fmt.format(val)
-        else: return str(val)
-    except: return str(val)
-
-
-class TradingAppGUI: # Renamed class for clarity
+class TradingAppGUI:
     def __init__(self, master):
         self.master = master
-        master.title("加密貨幣交易系統 (回測 / 實盤)") # Updated title
-        master.geometry("850x700") # Increased height slightly for new widgets
-        self.strategies_path = './strategies' # Relative path to strategies
-        self.data_path = './data'             # Relative path to data (for backtest)
-        self.strategy_classes = {}            # Stores display name -> strategy class (active mode)
-        self.current_param_widgets = {}       # Stores param_key -> (widget, type, options/range)
+        master.title("加密貨幣交易系統 (回測 / 實盤 / 走勢分析)")
+        master.geometry("850x800")
+        self.strategies_path = './strategies'
+        self.data_path = './data'
+        self.strategy_classes = {}
+        self.current_param_widgets = {}
         self.gui_queue = queue.Queue()
-        self.backtest_results = None          # Stores the full results dict after a backtest
-        self.backtest_plot_path = None        # Stores the path to the generated plot HTML
-        self.live_trader_instance = None      # Stores the active LiveTrader instance
+        self.backtest_results = None
+        self.backtest_plot_path = None
+        self.live_trader_instance = None
+        self.mode_var = tk.StringVar(value="backtest")
 
-        # Ensure directories exist (helper function below)
-        self._ensure_directory_and_init(self.strategies_path, "策略")
-        self._ensure_directory_and_init(self.data_path, "數據")
-        self._ensure_directory_and_init('./plots', "圖表") # Ensure plots dir exists
+        # 走勢分析相關變數
+        self.trend_analysis_results = None
 
-        # ----- GUI Element Creation -----
+        # 初始化所有UI組件
+        self._setup_main_frames()
+        self._setup_ui_elements()
+        self._setup_bindings()
 
-        # --- Mode Selection ---
-        mode_frame = ttk.Frame(master); mode_frame.grid(row=0, column=0, columnspan=2, padx=10, pady=(10, 0), sticky='ew')
-        ttk.Label(mode_frame, text="操作模式:").pack(side=tk.LEFT, padx=(0, 10))
-        self.mode_var = tk.StringVar(value="backtest") # Default to backtest
-        ttk.Radiobutton(mode_frame, text="回測", variable=self.mode_var, value="backtest", command=self.on_mode_change).pack(side=tk.LEFT, padx=5)
-        ttk.Radiobutton(mode_frame, text="實盤交易", variable=self.mode_var, value="live", command=self.on_mode_change).pack(side=tk.LEFT, padx=5)
+        # 設置初始模式
+        self.on_mode_change()
 
-        # --- Exchange Selection (Live Mode Only) ---
-        self.exchange_frame = ttk.Frame(master) # Will be placed later by on_mode_change
-        ttk.Label(self.exchange_frame, text="交易所:").pack(side=tk.LEFT, padx=(0, 5))
-        self.exchange_combobox = ttk.Combobox(self.exchange_frame, values=["Alpaca"], state="readonly", width=15) # Add more exchanges later if needed
-        self.exchange_combobox.set("Alpaca") # Default
-        self.exchange_combobox.pack(side=tk.LEFT)
-        # Grid placement handled by on_mode_change
+        # 設置窗口關閉處理
+        self.master.protocol("WM_DELETE_WINDOW", self.on_closing)
 
-        # --- Strategy Selection ---
-        strategy_frame = ttk.Frame(master); strategy_frame.grid(row=2, column=0, columnspan=2, padx=10, pady=(5, 5), sticky='ew') # Row changed to 2
-        ttk.Label(strategy_frame, text="交易策略:").pack(side=tk.LEFT, padx=(0, 5))
-        self.strategy_combobox = ttk.Combobox(strategy_frame, state="readonly", width=35); self.strategy_combobox.pack(side=tk.LEFT, expand=True, fill=tk.X)
-        self.strategy_combobox.bind('<<ComboboxSelected>>', self.on_strategy_selected)
+        # 啟動GUI隊列處理
+        self.process_gui_queue()
 
+        print("TradingAppGUI 初始化完成。")
 
-        # --- Data Loading Section (Backtest Mode Only) ---
-        self.data_frame = ttk.LabelFrame(master, text="數據加載 (回測模式)") # Label updated
-        # Grid placement handled by on_mode_change
-        self.data_frame.columnconfigure(0, weight=1); self.data_frame.columnconfigure(1, weight=1)
-        self.data_source_var = tk.StringVar(value="existing")
-        ttk.Radiobutton(self.data_frame, text="使用現有數據", variable=self.data_source_var, value="existing", command=self.toggle_data_source).grid(row=0, column=0, padx=5, pady=2, sticky='w')
-        ttk.Radiobutton(self.data_frame, text="下載新數據 (Binance)", variable=self.data_source_var, value="new", command=self.toggle_data_source).grid(row=0, column=1, padx=5, pady=2, sticky='w') # Clarified source
-        self.existing_data_frame = ttk.Frame(self.data_frame); self.existing_data_frame.grid(row=1, column=0, columnspan=2, padx=5, pady=5, sticky='ew')
-        self.existing_data_combobox = ttk.Combobox(self.existing_data_frame, state="readonly"); self.existing_data_combobox.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 5))
-        self.refresh_data_button = ttk.Button(self.existing_data_frame, text="刷新", command=self.load_existing_data_files, width=5); self.refresh_data_button.pack(side=tk.LEFT)
-        self.load_existing_data_files() # Load data files list initially
-        self.new_data_frame = ttk.Frame(self.data_frame); self.new_data_frame.columnconfigure(1, weight=1)
-        ttk.Label(self.new_data_frame, text="交易對:").grid(row=0, column=0, sticky='w', padx=(0,5), pady=2); self.symbol_entry = ttk.Entry(self.new_data_frame, width=20); self.symbol_entry.grid(row=0, column=1, padx=5, pady=2, sticky='ew'); self.symbol_entry.insert(0, "BTCUSDT")
-        ttk.Label(self.new_data_frame, text="時間框架:").grid(row=1, column=0, sticky='w', padx=(0,5), pady=2)
-        self.valid_intervals = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d', '3d', '1w', '1M']
-        self.interval_combobox = ttk.Combobox(self.new_data_frame, values=self.valid_intervals, state="readonly", width=18)
-        self.interval_combobox.grid(row=1, column=1, padx=5, pady=2, sticky='ew')
-        self.interval_combobox.set('1h') # Default to 1 hour
-        ttk.Label(self.new_data_frame, text="開始時間:").grid(row=2, column=0, sticky='w', padx=(0,5), pady=2); self.start_entry = ttk.Entry(self.new_data_frame, width=20); self.start_entry.grid(row=2, column=1, padx=5, pady=2, sticky='ew'); self.start_entry.insert(0, (datetime.now() - pd.Timedelta(days=365)).strftime("%Y/%m/%d 00:00"))
-        ttk.Label(self.new_data_frame, text="結束時間:").grid(row=3, column=0, sticky='w', padx=(0,5), pady=2); self.end_entry = ttk.Entry(self.new_data_frame, width=20); self.end_entry.grid(row=3, column=1, padx=5, pady=2, sticky='ew'); self.end_entry.insert(0, datetime.now().strftime("%Y/%m/%d %H:%M"))
-        self.download_button = ttk.Button(self.new_data_frame, text="下載數據", command=self.download_data); self.download_button.grid(row=4, column=0, columnspan=2, pady=(10, 2))
-        self.download_status_label = ttk.Label(self.new_data_frame, text=""); self.download_status_label.grid(row=5, column=0, columnspan=2, pady=2)
-        # --- NEW: Binance Fetch Status Display ---
-        self.binance_fetch_status_label = ttk.Label(self.new_data_frame, text="", foreground="grey", wraplength=300); self.binance_fetch_status_label.grid(row=6, column=0, columnspan=2, pady=(2, 5), sticky='w')
+    def _setup_main_frames(self):
+        """初始化主要框架"""
+        # 模式選擇框架
+        self.mode_frame = ttk.Frame(self.master)
+        self.mode_frame.grid(row=0, column=0, columnspan=2, padx=10, pady=5, sticky='w')
 
+        # 交易所框架 (實盤模式)
+        self.exchange_frame = ttk.LabelFrame(self.master, text="交易所設置")
 
-        # --- Live Trading Parameters Frame (Live Mode Only) ---
-        self.live_params_frame = ttk.LabelFrame(master, text="實盤參數") # Will be placed by on_mode_change
+        # 創建交易所選擇控件
+        ttk.Label(self.exchange_frame, text="交易所:").pack(side=tk.LEFT, padx=(5, 5))
+        self.exchange_combobox = ttk.Combobox(self.exchange_frame, values=["Alpaca"], state="readonly", width=15)
+        self.exchange_combobox.set("Alpaca")  # 默認值
+        self.exchange_combobox.pack(side=tk.LEFT, padx=(0, 5))
+
+        # 數據框架 (回測模式)
+        self.data_frame = ttk.LabelFrame(self.master, text="數據加載")
+
+        # 實盤參數框架
+        self.live_params_frame = ttk.LabelFrame(self.master, text="實盤交易參數")
         self.live_params_frame.columnconfigure(1, weight=1)
-        ttk.Label(self.live_params_frame, text="交易對 (Symbol):").grid(row=0, column=0, padx=5, pady=3, sticky='w')
-        self.live_symbol_entry = ttk.Entry(self.live_params_frame, width=15); self.live_symbol_entry.grid(row=0, column=1, padx=5, pady=3, sticky='ew'); self.live_symbol_entry.insert(0, "BTC/USD") # Alpaca crypto format
-        ttk.Label(self.live_params_frame, text="交易數量 (Qty):").grid(row=1, column=0, padx=5, pady=3, sticky='w')
-        self.live_qty_entry = ttk.Entry(self.live_params_frame, width=15); self.live_qty_entry.grid(row=1, column=1, padx=5, pady=3, sticky='ew'); self.live_qty_entry.insert(0, "0.001")
-        # Add Timeframe selection for Live mode
+
+        # 創建實盤參數控件
+        ttk.Label(self.live_params_frame, text="交易對:").grid(row=0, column=0, padx=5, pady=3, sticky='w')
+        self.live_symbol_entry = ttk.Entry(self.live_params_frame, width=15)
+        self.live_symbol_entry.grid(row=0, column=1, padx=5, pady=3, sticky='ew')
+        self.live_symbol_entry.insert(0, "BTC/USD")  # Alpaca格式
+
+        ttk.Label(self.live_params_frame, text="交易數量:").grid(row=1, column=0, padx=5, pady=3, sticky='w')
+        self.live_qty_entry = ttk.Entry(self.live_params_frame, width=15)
+        self.live_qty_entry.grid(row=1, column=1, padx=5, pady=3, sticky='ew')
+        self.live_qty_entry.insert(0, "0.001")
+
         ttk.Label(self.live_params_frame, text="時間框架:").grid(row=2, column=0, padx=5, pady=3, sticky='w')
-        # Use the same valid intervals as backtest for consistency (defined in __init__)
-        self.live_interval_combobox = ttk.Combobox(self.live_params_frame, values=self.valid_intervals, state="readonly", width=13)
+        self.live_interval_combobox = ttk.Combobox(self.live_params_frame, values=['1m', '5m', '15m', '30m', '1h', '4h', '1d'], state="readonly", width=13)
         self.live_interval_combobox.grid(row=2, column=1, padx=5, pady=3, sticky='ew')
-        self.live_interval_combobox.set('1h') # Default to 1 hour for live trading
-        # Adjust paper trading checkbox row
-        self.paper_trading_var = tk.BooleanVar(value=True) # Default to paper trading
-        ttk.Checkbutton(self.live_params_frame, text="使用模擬盤 (Paper Trading)", variable=self.paper_trading_var).grid(row=3, column=0, columnspan=2, padx=5, pady=5, sticky='w')
+        self.live_interval_combobox.set('1h')
 
+        self.paper_trading_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(self.live_params_frame, text="使用模擬盤", variable=self.paper_trading_var).grid(row=3, column=0, columnspan=2, padx=5, pady=5, sticky='w')
 
-        # --- Parameter Settings Section (Combined Backtest/Strategy) ---
-        # Row changed to 4
-        self.param_outer_frame = ttk.Frame(master); self.param_outer_frame.grid(row=4, column=0, columnspan=2, padx=10, pady=5, sticky='nsew') # Changed to self.param_outer_frame
-        # Backtest Params (Backtest Mode Only)
-        self.backtest_params_frame = ttk.LabelFrame(self.param_outer_frame, text="回測參數") # Use self.param_outer_frame
-        self.backtest_params_frame.columnconfigure(1, weight=1)
-        ttk.Label(self.backtest_params_frame, text="起始本金 (USDT):").grid(row=0, column=0, padx=5, pady=3, sticky='w'); self.capital_entry = ttk.Entry(self.backtest_params_frame, width=12); self.capital_entry.grid(row=0, column=1, padx=5, pady=3, sticky='ew'); self.capital_entry.insert(0, "100000")
-        ttk.Label(self.backtest_params_frame, text="投入淨值比例:").grid(row=1, column=0, padx=5, pady=3, sticky='w'); self.size_frac_entry = ttk.Entry(self.backtest_params_frame, width=12); self.size_frac_entry.grid(row=1, column=1, padx=5, pady=3, sticky='ew'); self.size_frac_entry.insert(0, "0.1")
-        ttk.Label(self.backtest_params_frame, text="槓桿倍數:").grid(row=2, column=0, padx=5, pady=3, sticky='w'); self.leverage_entry = ttk.Entry(self.backtest_params_frame, width=12); self.leverage_entry.grid(row=2, column=1, padx=5, pady=3, sticky='ew'); self.leverage_entry.insert(0, "1.0")
-        ttk.Label(self.backtest_params_frame, text="進場偏移 (%)(可小數):").grid(row=3, column=0, padx=5, pady=3, sticky='w'); self.offset_entry = ttk.Entry(self.backtest_params_frame, width=12); self.offset_entry.grid(row=3, column=1, padx=5, pady=3, sticky='ew'); self.offset_entry.insert(0, "0.0")
+        # 實盤狀態框架
+        self.live_status_frame = ttk.LabelFrame(self.master, text="交易狀態")
+        self.live_status_frame.columnconfigure(1, weight=1)
 
-        # Strategy Params (Both Modes)
-        self.strategy_params_frame = ttk.LabelFrame(self.param_outer_frame, text="策略參數") # Use self.param_outer_frame
-        self.strategy_params_frame.columnconfigure(0, weight=0, pad=5); self.strategy_params_frame.columnconfigure(1, weight=1, pad=5)
-        # Packing order handled by on_mode_change
+        # 走勢分析框架
+        self.trend_analysis_frame = ttk.LabelFrame(self.master, text="走勢分析設置")
+        self.trend_analysis_frame.columnconfigure(1, weight=1)
 
-        # --- *** NEW: Live Status Display (Live Mode Only) *** ---
-        # Row 5
-        self.live_status_frame = ttk.LabelFrame(master, text="實時狀態")
-        # Grid placement handled by on_mode_change
-        self.live_status_frame.columnconfigure(1, weight=1) # Allow value labels to expand
-
+        # 創建狀態顯示控件
         ttk.Label(self.live_status_frame, text="帳戶餘額:").grid(row=0, column=0, padx=5, pady=2, sticky='w')
         self.balance_var = tk.StringVar(value="N/A")
         self.balance_label = ttk.Label(self.live_status_frame, textvariable=self.balance_var, anchor=tk.W)
@@ -161,55 +119,94 @@ class TradingAppGUI: # Renamed class for clarity
 
         ttk.Label(self.live_status_frame, text="當前持倉:").grid(row=1, column=0, padx=5, pady=2, sticky='w')
         self.positions_var = tk.StringVar(value="N/A")
-        self.positions_label = ttk.Label(self.live_status_frame, textvariable=self.positions_var, anchor=tk.W, wraplength=300) # Allow wrapping
+        self.positions_label = ttk.Label(self.live_status_frame, textvariable=self.positions_var, anchor=tk.W, wraplength=300)
         self.positions_label.grid(row=1, column=1, padx=5, pady=2, sticky='ew')
 
         ttk.Label(self.live_status_frame, text="當前掛單:").grid(row=2, column=0, padx=5, pady=2, sticky='w')
         self.orders_var = tk.StringVar(value="N/A")
-        self.orders_label = ttk.Label(self.live_status_frame, textvariable=self.orders_var, anchor=tk.W, wraplength=300) # Allow wrapping
+        self.orders_label = ttk.Label(self.live_status_frame, textvariable=self.orders_var, anchor=tk.W, wraplength=300)
         self.orders_label.grid(row=2, column=1, padx=5, pady=2, sticky='ew')
 
+        # 參數外部框架
+        self.param_outer_frame = ttk.LabelFrame(self.master, text="策略參數")
+        self.param_outer_frame.grid(row=4, column=0, columnspan=2, padx=10, pady=5, sticky='nsew')
 
-        # --- Results / Log Display ---
-        # Row changed to 6
-        result_frame = ttk.LabelFrame(master, text="結果 / 日誌"); result_frame.grid(row=6, column=0, columnspan=2, padx=10, pady=10, sticky='nsew')
-        result_frame.rowconfigure(0, weight=1); result_frame.columnconfigure(0, weight=1)
-        self.result_text = tk.Text(result_frame, height=8, wrap=tk.WORD, relief=tk.FLAT, bd=0); self.result_text.grid(row=0, column=0, sticky='nsew', padx=1, pady=1) # Reduced height slightly
-        scrollbar = ttk.Scrollbar(result_frame, orient=tk.VERTICAL, command=self.result_text.yview); scrollbar.grid(row=0, column=1, sticky='ns')
-        self.result_text['yscrollcommand'] = scrollbar.set
+        # 回測參數框架
+        self.backtest_params_frame = ttk.Frame(self.param_outer_frame)
 
-        # --- Control Buttons ---
-        # Row changed to 7
-        self.control_frame = ttk.Frame(master); self.control_frame.grid(row=7, column=0, columnspan=2, pady=(0, 10))
-        self.control_frame.columnconfigure(0, weight=1)
-        button_inner_frame = ttk.Frame(self.control_frame); button_inner_frame.grid(row=0, column=0)
-        # Start/Stop buttons will be managed by on_mode_change
-        self.start_button = ttk.Button(button_inner_frame, text="開始回測", command=self.start_backtest) # Initial text/command
+        # 策略參數框架
+        self.strategy_params_frame = ttk.Frame(self.param_outer_frame)
+
+        # 結果框架
+        self.results_frame = ttk.LabelFrame(self.master, text="結果 / 日誌")
+        self.results_frame.grid(row=6, column=0, columnspan=2, padx=10, pady=5, sticky='nsew')
+
+        # 按鈕框架
+        self.button_frame = ttk.Frame(self.master)
+        self.button_frame.grid(row=7, column=0, columnspan=2, padx=10, pady=5, sticky='ew')
+
+        # 狀態欄
+        self.status_var = tk.StringVar(value="準備就緒")
+        self.status_bar = ttk.Label(self.master, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W, padding=(5, 2))
+        self.status_bar.grid(row=8, column=0, columnspan=2, sticky='ew')
+
+    def _setup_ui_elements(self):
+        """初始化UI元素"""
+        # 模式選擇
+        ttk.Label(self.mode_frame, text="模式:").pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Radiobutton(self.mode_frame, text="回測", variable=self.mode_var, value="backtest").pack(side=tk.LEFT, padx=5)
+        ttk.Radiobutton(self.mode_frame, text="實盤交易", variable=self.mode_var, value="live").pack(side=tk.LEFT, padx=5)
+        ttk.Radiobutton(self.mode_frame, text="走勢分析", variable=self.mode_var, value="trend_analysis").pack(side=tk.LEFT, padx=5)
+
+        # 策略選擇
+        ttk.Label(self.master, text="選擇策略:").grid(row=2, column=0, padx=10, pady=5, sticky='w')
+        self.strategy_combobox = ttk.Combobox(self.master, state="readonly")
+        self.strategy_combobox.grid(row=2, column=1, padx=10, pady=5, sticky='ew')
+
+        # 回測參數
+        ttk.Label(self.backtest_params_frame, text="起始本金:").grid(row=0, column=0, padx=5, pady=2, sticky='w')
+        self.capital_var = tk.StringVar(value="10000")
+        self.capital_entry = ttk.Entry(self.backtest_params_frame, textvariable=self.capital_var, width=10)
+        self.capital_entry.grid(row=0, column=1, padx=5, pady=2, sticky='w')
+
+        ttk.Label(self.backtest_params_frame, text="槓桿倍數:").grid(row=1, column=0, padx=5, pady=2, sticky='w')
+        self.leverage_var = tk.StringVar(value="1.0")
+        self.leverage_entry = ttk.Entry(self.backtest_params_frame, textvariable=self.leverage_var, width=10)
+        self.leverage_entry.grid(row=1, column=1, padx=5, pady=2, sticky='w')
+
+        ttk.Label(self.backtest_params_frame, text="進場偏移(%):").grid(row=2, column=0, padx=5, pady=2, sticky='w')
+        self.offset_var = tk.StringVar(value="0.0")
+        self.offset_entry = ttk.Entry(self.backtest_params_frame, textvariable=self.offset_var, width=10)
+        self.offset_entry.grid(row=2, column=1, padx=5, pady=2, sticky='w')
+
+        # 結果文本框
+        self.result_text = tk.Text(self.results_frame, wrap=tk.WORD, height=8)
+        self.result_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        # 按鈕
+        self.start_button = ttk.Button(self.button_frame, text="開始回測", command=self.start_backtest)
         self.start_button.pack(side=tk.LEFT, padx=5)
-        self.stop_button = ttk.Button(button_inner_frame, text="停止交易", command=self.stop_live_trading, state=tk.DISABLED) # Initially hidden/disabled
-        # self.stop_button packing handled by on_mode_change
-        self.clear_button = ttk.Button(button_inner_frame, text="清除日誌", command=self.clear_results); self.clear_button.pack(side=tk.LEFT, padx=5)
-        # View buttons remain, but might be disabled in live mode or show different things
-        self.view_plot_button = ttk.Button(button_inner_frame, text="查看回測圖表", command=self.view_backtest_plot, state=tk.DISABLED); self.view_plot_button.pack(side=tk.LEFT, padx=5)
-        self.view_trades_button = ttk.Button(button_inner_frame, text="查看交易記錄", command=self.view_trade_records, state=tk.DISABLED); self.view_trades_button.pack(side=tk.LEFT, padx=5)
-        self.view_order_log_button = ttk.Button(button_inner_frame, text="查看訂單日誌", command=self.view_order_log, state=tk.DISABLED); self.view_order_log_button.pack(side=tk.LEFT, padx=5)
 
-        # --- Status Bar ---
-        # Row changed to 8
-        self.status_bar = ttk.Label(master, text="準備就緒", relief=tk.SUNKEN, anchor=tk.W, padding=(5, 2)); self.status_bar.grid(row=8, column=0, columnspan=3, sticky='ew')
+        self.stop_button = ttk.Button(self.button_frame, text="停止", command=self.stop_live_trading)
+        # 停止按鈕在實盤模式下顯示
 
-        # --- Final Layout & Start ---
-        master.columnconfigure(0, weight=1); master.columnconfigure(1, weight=1)
-        master.rowconfigure(6, weight=1) # Row 6 (results/log) should expand
+        self.clear_button = ttk.Button(self.button_frame, text="清除結果", command=self.clear_results)
+        self.clear_button.pack(side=tk.LEFT, padx=5)
 
-        # Initial UI state based on default mode (backtest)
-        self.on_mode_change() # Call this to set initial visibility and load strategies
+        # 回測結果查看按鈕
+        self.view_plot_button = ttk.Button(self.button_frame, text="查看圖表", command=self.view_backtest_plot, state=tk.DISABLED)
+        self.view_plot_button.pack(side=tk.LEFT, padx=5)
 
-        print("強制更新 UI..."); master.update_idletasks(); master.update(); print("UI 更新完成。")
-        self.process_gui_queue()
-        # --- Add window close handler ---
-        self.master.protocol("WM_DELETE_WINDOW", self.on_closing)
-        print("TradingAppGUI 初始化完成。")
+        self.view_trades_button = ttk.Button(self.button_frame, text="查看交易", command=self.view_trade_records, state=tk.DISABLED)
+        self.view_trades_button.pack(side=tk.LEFT, padx=5)
+
+        self.view_order_log_button = ttk.Button(self.button_frame, text="查看訂單日誌", command=self.view_order_log, state=tk.DISABLED)
+        self.view_order_log_button.pack(side=tk.LEFT, padx=5)
+
+    def _setup_bindings(self):
+        """設置事件綁定"""
+        self.mode_var.trace_add("write", lambda *_: self.on_mode_change())
+        self.strategy_combobox.bind("<<ComboboxSelected>>", self.on_strategy_selected)
 
     # --- *** NEW Method: Handle Window Closing *** ---
     def on_closing(self):
@@ -234,62 +231,336 @@ class TradingAppGUI: # Renamed class for clarity
     def on_mode_change(self):
         """Updates the GUI layout and available options based on the selected mode."""
         mode = self.mode_var.get()
-        print(f"模式切換: {mode}")
+        print(f"\n=== 模式切換開始: {mode} ===")
+        print(f"當前策略參數框架子組件: {self.strategy_params_frame.winfo_children()}")
 
         # Clear previous strategy params UI first
-        for w in self.strategy_params_frame.winfo_children(): w.destroy()
+        for w in self.strategy_params_frame.winfo_children():
+            print(f"移除策略參數組件: {w}")
+            w.destroy()
+
         self.current_param_widgets = {}
-        self.strategy_combobox.set('') # Clear strategy selection
+        self.strategy_combobox.set('')
 
         if mode == "backtest":
-            # Show Backtest related frames, hide Live frames
+            print("\n[回測模式] 配置UI...")
+            # 隱藏實盤組件
             self.exchange_frame.grid_remove()
-            self.data_frame.grid(row=3, column=0, columnspan=2, padx=10, pady=5, sticky='ew') # Place data frame
+            print("隱藏交易所框架")
+
+            # 顯示數據框架
+            self.data_frame.grid(row=3, column=0, columnspan=2, padx=10, pady=5, sticky='ew')
+            print(f"數據框架位置: row=3, column=0")
+
+            # 設置數據框架內容
+            self.setup_simplified_data_frame()
+            print("已設置數據框架內容")
+
             self.live_params_frame.grid_remove()
-            self.live_status_frame.grid_remove() # Hide live status frame
-            # Ensure param_outer_frame children are packed correctly
-            self.backtest_params_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10), anchor='nw', in_=self.param_outer_frame) # Pack backtest params
-            self.strategy_params_frame.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, in_=self.param_outer_frame) # Pack strategy params next to it
+            self.live_status_frame.grid_remove()
 
-            # Configure buttons for Backtest
-            self.start_button.config(text="開始回測", command=self.start_backtest, state=tk.NORMAL)
-            self.stop_button.pack_forget() # Hide stop button
-            self.view_plot_button.config(state=tk.DISABLED) # Reset view buttons
-            self.view_trades_button.config(state=tk.DISABLED)
-            self.view_order_log_button.config(state=tk.DISABLED)
-            self.clear_button.config(text="清除結果") # Reset clear button text
+            # 參數框架布局
+            print("\n配置參數框架:")
+            self.backtest_params_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10), anchor='nw', in_=self.param_outer_frame)
+            print(f"回測參數框架pack: side=LEFT, anchor=NW")
 
-            # Load backtest strategies
-            self.load_strategies(live_mode=False)
-            self.toggle_data_source() # Ensure correct data source view is shown
+            self.strategy_params_frame.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, in_=self.param_outer_frame)
+            print(f"策略參數框架pack: side=LEFT, expand=True")
+
+            # 按鈕配置
+            self.start_button.config(text="開始回測", state=tk.NORMAL)
+            self.stop_button.pack_forget()
+            print("顯示開始回測按鈕，隱藏停止按鈕")
 
         elif mode == "live":
-            # Show Live Trading related frames, hide Backtest frames
-            self.exchange_frame.grid(row=1, column=0, columnspan=2, padx=10, pady=(0,5), sticky='w') # Place exchange frame
-            self.data_frame.grid_remove() # Hide data loading
-            self.backtest_params_frame.pack_forget() # Hide backtest params
-            self.live_params_frame.grid(row=3, column=0, columnspan=2, padx=10, pady=5, sticky='ew') # Place live params frame
-            # Ensure strategy params frame is packed correctly (alone in outer frame)
+            print("\n[實盤模式] 配置UI...")
+            # 交易所框架
+            self.exchange_frame.grid(row=1, column=0, columnspan=2, padx=10, pady=(0,5), sticky='w')
+            print(f"交易所框架位置: row=1, column=0")
+
+            # 隱藏數據框架
+            self.data_frame.grid_remove()
+            self.backtest_params_frame.pack_forget()
+
+            # 實盤參數框架
+            self.live_params_frame.grid(row=3, column=0, columnspan=2, padx=10, pady=5, sticky='ew')
+            print(f"實盤參數框架位置: row=3, column=0")
+
+            # 策略參數框架
             self.strategy_params_frame.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, in_=self.param_outer_frame)
-            # Show live status frame
-            self.live_status_frame.grid(row=5, column=0, columnspan=2, padx=10, pady=5, sticky='ew') # Place live status frame
+            print(f"策略參數框架pack: side=LEFT, expand=True")
 
-            # Configure buttons for Live Trading
-            self.start_button.config(text="開始交易", command=self.start_live_trading, state=tk.NORMAL)
-            self.stop_button.pack(side=tk.LEFT, padx=5) # Show stop button
-            self.stop_button.config(state=tk.DISABLED) # Initially disabled until trading starts
-            self.view_plot_button.config(state=tk.DISABLED) # Disable backtest-specific views
-            self.view_trades_button.config(state=tk.DISABLED) # Could potentially show live trades later
-            self.view_order_log_button.config(state=tk.DISABLED) # Could potentially show live order log later
-            self.clear_button.config(text="清除日誌") # Update clear button text
+            # 狀態框架
+            self.live_status_frame.grid(row=5, column=0, columnspan=2, padx=10, pady=5, sticky='ew')
+            print(f"狀態框架位置: row=5, column=0")
 
-            # Load live strategies
-            self.load_strategies(live_mode=True)
+            # 按鈕配置
+            self.start_button.config(text="開始實盤", state=tk.NORMAL)
+            self.stop_button.pack(side=tk.LEFT, padx=5)
+            print("顯示開始實盤和停止按鈕")
 
-        # Update params UI after loading strategies for the new mode
-        self.update_strategy_params_ui()
-        self.set_status(f"模式已切換至: {'回測' if mode == 'backtest' else '實盤交易'}")
+        elif mode == "trend_analysis":
+            print("\n[走勢分析模式] 配置UI...")
+            # 隱藏所有其他組件
+            self.exchange_frame.grid_remove()
+            self.live_params_frame.grid_remove()
+            self.live_status_frame.grid_remove()
+            self.backtest_params_frame.pack_forget()
+            self.data_frame.grid_remove()  # 隱藏舊的數據框架
 
+            # 只顯示走勢分析框架（N8N工作流UI）
+            self.trend_analysis_frame.grid(row=3, column=0, columnspan=2, padx=10, pady=5, sticky='ew')
+            print(f"走勢分析框架位置: row=3, column=0")
+
+            # 設置走勢分析框架內容
+            self.setup_trend_analysis_frame()
+            print("已設置走勢分析框架內容")
+
+            # 隱藏舊的按鈕
+            self.start_button.pack_forget()  # 隱藏舊的開始按鈕
+            self.stop_button.pack_forget()  # 隱藏停止按鈕
+            print("隱藏舊的按鈕，使用N8N工作流按鈕")
+
+        # 後續配置
+        print("\n進行後續配置:")
+        if mode != "trend_analysis":  # 走勢分析模式不需要載入策略
+            self.load_strategies(live_mode=(mode == "live"))
+            self.update_strategy_params_ui()
+
+        mode_text = {"backtest": "回測", "live": "實盤交易", "trend_analysis": "走勢分析"}
+        self.set_status(f"模式已切換至: {mode_text.get(mode, mode)}")
+        print(f"=== 模式切換完成: {mode} ===\n")
+
+        # 強制更新UI
+        self.master.update_idletasks()
+        print("UI強制更新完成")
+
+    # --- 添加簡化的數據框架設置方法 ---
+    def setup_simplified_data_frame(self):
+        """設置簡化的數據加載框架"""
+        # 清除現有的數據框架內容
+        for widget in self.data_frame.winfo_children():
+            widget.destroy()
+
+        # 重新配置列權重
+        self.data_frame.columnconfigure(0, weight=1)
+        self.data_frame.columnconfigure(1, weight=1)
+
+        # 交易對選擇
+        ttk.Label(self.data_frame, text="交易對:").grid(row=0, column=0, padx=5, pady=2, sticky='w')
+        self.symbol_var = tk.StringVar(value="BTCUSDT")
+        self.symbol_entry = ttk.Entry(self.data_frame, textvariable=self.symbol_var)
+        self.symbol_entry.grid(row=0, column=1, padx=5, pady=2, sticky='ew')
+
+        # 時間框架選擇
+        ttk.Label(self.data_frame, text="時間框架:").grid(row=1, column=0, padx=5, pady=2, sticky='w')
+        self.interval_var = tk.StringVar(value="1h")
+        intervals = ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w", "1M"]
+        self.interval_combo = ttk.Combobox(self.data_frame, textvariable=self.interval_var, values=intervals, state="readonly")
+        self.interval_combo.grid(row=1, column=1, padx=5, pady=2, sticky='ew')
+
+        # 日期選擇
+        ttk.Label(self.data_frame, text="開始日期:").grid(row=2, column=0, padx=5, pady=2, sticky='w')
+
+        # 檢查是否已導入 DateEntry
+        try:
+            from tkcalendar import DateEntry
+            self.start_date_picker = DateEntry(self.data_frame, width=12, background='darkblue', foreground='white', date_pattern='yyyy-mm-dd')
+        except ImportError:
+            # 如果沒有 tkcalendar，使用簡單的 Entry
+            self.start_date_var = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d"))
+            self.start_date_picker = ttk.Entry(self.data_frame, textvariable=self.start_date_var)
+
+        self.start_date_picker.grid(row=2, column=1, padx=5, pady=2, sticky='ew')
+
+        ttk.Label(self.data_frame, text="結束日期:").grid(row=3, column=0, padx=5, pady=2, sticky='w')
+
+        try:
+            from tkcalendar import DateEntry
+            self.end_date_picker = DateEntry(self.data_frame, width=12, background='darkblue', foreground='white', date_pattern='yyyy-mm-dd')
+        except ImportError:
+            # 如果沒有 tkcalendar，使用簡單的 Entry
+            self.end_date_var = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d"))
+            self.end_date_picker = ttk.Entry(self.data_frame, textvariable=self.end_date_var)
+
+        self.end_date_picker.grid(row=3, column=1, padx=5, pady=2, sticky='ew')
+
+        # 數據狀態顯示
+        ttk.Label(self.data_frame, text="數據狀態:").grid(row=4, column=0, padx=5, pady=2, sticky='w')
+        self.data_status_var = tk.StringVar(value="未加載")
+        ttk.Label(self.data_frame, textvariable=self.data_status_var).grid(row=4, column=1, padx=5, pady=2, sticky='w')
+
+        # 進度條
+        ttk.Label(self.data_frame, text="下載進度:").grid(row=5, column=0, padx=5, pady=2, sticky='w')
+        self.progress_var = tk.DoubleVar()
+        self.progress_bar = ttk.Progressbar(self.data_frame, variable=self.progress_var, maximum=100)
+        self.progress_bar.grid(row=5, column=1, padx=5, pady=2, sticky='ew')
+
+        # 加載數據按鈕
+        self.load_data_btn = ttk.Button(self.data_frame, text="加載數據", command=self.prepare_data)
+        self.load_data_btn.grid(row=6, column=0, columnspan=2, padx=5, pady=5, sticky='ew')
+
+    # --- 修改 prepare_data 方法 ---
+    def prepare_data(self):
+        """智能準備數據 - 檢查本地數據，必要時下載"""
+        # 獲取用戶輸入
+        symbol = self.symbol_var.get().strip().upper()
+        interval = self.interval_var.get()
+
+        # 獲取日期
+        try:
+            # 嘗試從 DateEntry 獲取日期
+            if hasattr(self.start_date_picker, 'get_date'):
+                start_date = self.start_date_picker.get_date()
+                end_date = self.end_date_picker.get_date()
+            else:
+                # 從字符串解析日期
+                start_date = datetime.strptime(self.start_date_var.get(), "%Y-%m-%d").date()
+                end_date = datetime.strptime(self.end_date_var.get(), "%Y-%m-%d").date()
+        except Exception as e:
+            self.show_message("error", "日期格式錯誤", f"請使用正確的日期格式 (YYYY-MM-DD): {e}")
+            return
+
+        # 基本驗證
+        if not symbol:
+            self.show_message("error", "錯誤", "請輸入交易對符號")
+            return
+
+        if start_date > end_date:
+            self.show_message("error", "日期錯誤", "開始日期不能晚於結束日期")
+            return
+
+        # 設置狀態
+        self.set_status(f"正在準備 {symbol} {interval} 數據...")
+        self.gui_queue.put(("disable_controls", None))
+        self.data_status_var.set("準備中...")
+        self.gui_queue.put(("update_progress", 0))  # 重置進度條
+
+        # 創建監控隊列
+        monitor_queue = queue.Queue()
+
+        # 創建線程進行數據準備
+        prepare_thread = threading.Thread(
+            target=self._prepare_data_thread,
+            args=(symbol, interval, start_date, end_date, monitor_queue)
+        )
+        prepare_thread.daemon = True
+        prepare_thread.start()
+
+        # 創建監控線程
+        monitor_thread = threading.Thread(
+            target=self._monitor_data_preparation,
+            args=(monitor_queue,)
+        )
+        monitor_thread.daemon = True
+        monitor_thread.start()
+
+    # --- 修改 setup_ui 方法，確保初始化時調用 setup_simplified_data_frame ---
+    def setup_ui(self):
+        """設置主界面"""
+        # ... 現有代碼 ...
+
+        # 在初始化完成後，如果當前模式是回測，設置簡化的數據框架
+        if self.mode_var.get() == "backtest":
+            self.setup_simplified_data_frame() # Show simplified data loading interface
+
+    def setup_trend_analysis_frame(self):
+        """設置走勢分析框架內容 - 完全按照N8N工作流邏輯"""
+        # 清除現有內容
+        for widget in self.trend_analysis_frame.winfo_children():
+            widget.destroy()
+
+        # 標題說明
+        title_label = ttk.Label(self.trend_analysis_frame,
+                               text="🚀 專業級加密貨幣分析系統 (基於N8N工作流)",
+                               font=('Microsoft JhengHei', 12, 'bold'))
+        title_label.grid(row=0, column=0, columnspan=3, padx=5, pady=10, sticky='w')
+
+        # 說明文字
+        desc_label = ttk.Label(self.trend_analysis_frame,
+                              text="輸入幣種名稱，系統將自動獲取多時間框架數據並進行專業分析",
+                              font=('Microsoft JhengHei', 9), foreground='gray')
+        desc_label.grid(row=1, column=0, columnspan=3, padx=5, pady=(0, 15), sticky='w')
+
+        # 幣種輸入 (核心功能)
+        symbol_frame = ttk.LabelFrame(self.trend_analysis_frame, text="交易對設置")
+        symbol_frame.grid(row=2, column=0, columnspan=3, padx=5, pady=5, sticky='ew')
+
+        ttk.Label(symbol_frame, text="幣種名稱:").grid(row=0, column=0, padx=10, pady=8, sticky='w')
+        self.symbol_entry = ttk.Entry(symbol_frame, width=15, font=('Arial', 11))
+        self.symbol_entry.grid(row=0, column=1, padx=5, pady=8, sticky='w')
+        self.symbol_entry.insert(0, "BTC")  # 預設值
+
+        ttk.Label(symbol_frame, text="(例: BTC, ETH, ADA)",
+                 font=('Arial', 8), foreground='gray').grid(row=0, column=2, padx=5, pady=8, sticky='w')
+
+        # 或者直接輸入完整交易對
+        ttk.Label(symbol_frame, text="或完整交易對:").grid(row=1, column=0, padx=10, pady=8, sticky='w')
+        self.trading_pair_entry = ttk.Entry(symbol_frame, width=15, font=('Arial', 11))
+        self.trading_pair_entry.grid(row=1, column=1, padx=5, pady=8, sticky='w')
+
+        ttk.Label(symbol_frame, text="(例: BTCUSDT, ETHUSDT)",
+                 font=('Arial', 8), foreground='gray').grid(row=1, column=2, padx=5, pady=8, sticky='w')
+
+        # API設置 (可選)
+        api_frame = ttk.LabelFrame(self.trend_analysis_frame, text="API設置 (可選)")
+        api_frame.grid(row=3, column=0, columnspan=3, padx=5, pady=5, sticky='ew')
+
+        ttk.Label(api_frame, text="Google API 密鑰:").grid(row=0, column=0, padx=10, pady=5, sticky='w')
+        self.google_api_key_entry = ttk.Entry(api_frame, width=40, show="*")
+        self.google_api_key_entry.grid(row=0, column=1, padx=5, pady=5, sticky='ew')
+
+        ttk.Label(api_frame, text="留空使用環境變數，或輸入 'test' 使用測試模式",
+                 font=('Arial', 8), foreground='gray').grid(row=1, column=0, columnspan=2, padx=10, pady=2, sticky='w')
+
+        # 分析選項
+        options_frame = ttk.LabelFrame(self.trend_analysis_frame, text="分析選項")
+        options_frame.grid(row=4, column=0, columnspan=3, padx=5, pady=5, sticky='ew')
+
+        ttk.Label(options_frame, text="分析詳細程度:").grid(row=0, column=0, padx=10, pady=8, sticky='w')
+        self.analysis_detail_var = tk.StringVar(value="標準")
+        detail_combobox = ttk.Combobox(options_frame, textvariable=self.analysis_detail_var,
+                                     values=["簡要", "標準", "詳細"], state="readonly", width=15)
+        detail_combobox.grid(row=0, column=1, padx=5, pady=8, sticky='w')
+
+        # 自動獲取說明
+        auto_label = ttk.Label(options_frame,
+                              text="✅ 自動獲取 15分鐘、1小時、1天 三個時間框架數據\n✅ 自動分析新聞情緒\n✅ 生成專業交易建議",
+                              font=('Arial', 9), foreground='green')
+        auto_label.grid(row=1, column=0, columnspan=3, padx=10, pady=8, sticky='w')
+
+        # 分析按鈕
+        button_frame = ttk.Frame(self.trend_analysis_frame)
+        button_frame.grid(row=5, column=0, columnspan=3, padx=5, pady=15, sticky='ew')
+
+        self.start_analysis_button = ttk.Button(button_frame, text="🚀 開始專業分析",
+                                               command=self.start_trend_analysis)
+        self.start_analysis_button.pack(side=tk.LEFT, padx=(0, 10))
+
+        # 查看詳細分析按鈕
+        self.view_analysis_button = ttk.Button(button_frame, text="📊 查看詳細分析",
+                                              command=self.view_last_analysis, state=tk.DISABLED)
+        self.view_analysis_button.pack(side=tk.LEFT)
+
+        # 結果顯示區域
+        result_frame = ttk.LabelFrame(self.trend_analysis_frame, text="分析結果")
+        result_frame.grid(row=6, column=0, columnspan=3, padx=5, pady=5, sticky='ew')
+
+        # 創建文本框和滾動條
+        text_frame = ttk.Frame(result_frame)
+        text_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        self.trend_result_text = tk.Text(text_frame, height=15, wrap=tk.WORD, font=('Microsoft JhengHei', 10))
+        self.trend_result_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        scrollbar = ttk.Scrollbar(text_frame, orient=tk.VERTICAL, command=self.trend_result_text.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.trend_result_text.config(yscrollcommand=scrollbar.set)
+
+        # 配置列權重
+        self.trend_analysis_frame.columnconfigure(1, weight=1)
+        symbol_frame.columnconfigure(1, weight=1)
+        api_frame.columnconfigure(1, weight=1)
 
     # --- Helper for ensuring directory and init file ---
     def _ensure_directory_and_init(self, path, name):
@@ -312,61 +583,84 @@ class TradingAppGUI: # Renamed class for clarity
 
     # --- GUI 更新與輔助函數 ---
     def process_gui_queue(self):
-        # (Modified to handle live trader updates)
+        """處理GUI更新隊列"""
         try:
             while True:
-                msg_type, data = self.gui_queue.get_nowait()
-                if msg_type == "messagebox":
-                    level, title, message = data
-                    if level == "error": messagebox.showerror(title, message)
-                    elif level == "warning": messagebox.showwarning(title, message)
-                    else: messagebox.showinfo(title, message)
-                elif msg_type == "status": self.status_bar.config(text=data)
-                elif msg_type == "download_status": self.download_status_label.config(text=data)
-                elif msg_type == "result_append": self.result_text.insert(tk.END, data); self.result_text.see(tk.END)
-                elif msg_type == "result_clear": self.result_text.delete(1.0, tk.END)
-                elif msg_type == "enable_controls": self.toggle_controls(True)
-                elif msg_type == "disable_controls": self.toggle_controls(False)
-                elif msg_type == "reload_data_files": self.load_existing_data_files()
-                elif msg_type == "live_trade_started": 
-                    self.toggle_live_controls(trading=True)
-                    # Clear previous status on start
-                    self.balance_var.set("獲取中...")
-                    self.positions_var.set("獲取中...")
-                    self.orders_var.set("獲取中...")
-                elif msg_type == "live_trade_stopped": 
-                    self.toggle_live_controls(trading=False)
-                    # Optionally clear status on stop, or leave last known
-                    # self.balance_var.set("N/A")
-                    # self.positions_var.set("N/A")
-                    # self.orders_var.set("N/A")
-                elif msg_type == "update_live_status":
-                    # Expect data to be a dictionary {'balance': ..., 'positions': ..., 'orders': ...}
-                    if isinstance(data, dict):
-                        self.balance_var.set(data.get('balance', self.balance_var.get()))
-                        self.positions_var.set(data.get('positions', self.positions_var.get()))
-                        self.orders_var.set(data.get('orders', self.orders_var.get()))
-                elif msg_type == "binance_fetch_status":
-                    # --- NEW: Handle Binance fetch status updates ---
-                    if isinstance(data, dict):
-                        status_text = f"Binance ({data.get('symbol', '?')}) 下載: "
-                        status_text += f"嘗試 {data.get('total_attempts', 0)} 次 "
-                        status_text += f"(成功 {data.get('successful_attempts', 0)}, "
-                        status_text += f"失敗 {data.get('failed_attempts', 0)}). "
-                        last_err = data.get('last_error')
-                        if last_err:
-                            err_time = last_err.get('timestamp', datetime.now()).strftime('%H:%M:%S')
-                            status_text += f"\n最後錯誤 ({err_time}): {last_err.get('error_type', 'Unknown')} - {last_err.get('message', 'N/A')}"
-                        else:
-                            if data.get('successful_attempts', 0) > 0:
-                                status_text += "下載成功。"
-                        
-                        # Update the dedicated label
-                        if hasattr(self, 'binance_fetch_status_label') and self.binance_fetch_status_label.winfo_exists():
-                            self.binance_fetch_status_label.config(text=status_text)
+                action, data = self.gui_queue.get_nowait()
 
-        except queue.Empty: pass
-        finally: self.master.after(100, self.process_gui_queue) # Check queue every 100ms
+                if action == "disable_controls":
+                    self.disable_controls()
+                elif action == "enable_controls":
+                    self.enable_controls()
+                elif action == "update_status":
+                    if hasattr(self, 'status_var'):
+                        self.status_var.set(data)
+                elif action == "update_data_status":
+                    self.data_status_var.set(data)
+                elif action == "update_progress":
+                    if hasattr(self, 'progress_var'):
+                        self.progress_var.set(data)
+                elif action == "show_error":
+                    messagebox.showerror("錯誤", data)
+                elif action == "show_info":
+                    messagebox.showinfo("信息", data)
+                elif action == "messagebox":
+                    level, title, message = data
+                    if level == "error":
+                        messagebox.showerror(title, message)
+                    elif level == "warning":
+                        messagebox.showwarning(title, message)
+                    elif level == "info":
+                        messagebox.showinfo(title, message)
+                elif action == "result_append":
+                    self.result_text.insert(tk.END, data)
+                    self.result_text.see(tk.END)
+                elif action == "result_clear":
+                    self.result_text.delete(1.0, tk.END)
+                elif action == "enable_start_button":
+                    self.start_button.config(state=tk.NORMAL)
+                elif action == "live_trade_started":
+                    self.toggle_live_controls(trading=True)
+                    # 清除之前的狀態
+                    if hasattr(self, 'balance_var'):
+                        self.balance_var.set("獲取中...")
+                    if hasattr(self, 'positions_var'):
+                        self.positions_var.set("獲取中...")
+                    if hasattr(self, 'orders_var'):
+                        self.orders_var.set("獲取中...")
+                elif action == "live_trade_stopped":
+                    self.toggle_live_controls(trading=False)
+                elif action == "update_live_status":
+                    # 期望data是一個字典 {'balance': ..., 'positions': ..., 'orders': ...}
+                    if isinstance(data, dict):
+                        if hasattr(self, 'balance_var') and 'balance' in data:
+                            self.balance_var.set(data['balance'])
+                        if hasattr(self, 'positions_var') and 'positions' in data:
+                            self.positions_var.set(data['positions'])
+                        if hasattr(self, 'orders_var') and 'orders' in data:
+                            self.orders_var.set(data['orders'])
+
+                self.gui_queue.task_done()
+        except queue.Empty:
+            pass
+        finally:
+            # 每100ms檢查一次隊列
+            self.master.after(100, self.process_gui_queue)
+
+    def disable_controls(self):
+        """禁用控件"""
+        if hasattr(self, 'load_data_btn'):
+            self.load_data_btn.configure(state="disabled")
+        if hasattr(self, 'start_button'):
+            self.start_button.configure(state="disabled")
+        if hasattr(self, 'run_button'):
+            self.run_button.configure(state="disabled")
+        # 禁用其他需要的控件...
+
+    def enable_controls(self):
+        """啟用控件 - 使用 toggle_controls 來正確處理所有控件狀態"""
+        self.toggle_controls(enabled=True)
+
 
     def toggle_controls(self, enabled=True):
         # (Modified to consider mode and live trading state)
@@ -381,9 +675,9 @@ class TradingAppGUI: # Renamed class for clarity
         # Mode-specific controls
         if mode == 'backtest':
             self.start_button.config(state=st)
-            self.download_button.config(state=st)
-            self.refresh_data_button.config(state=st)
-            self.existing_data_combobox.config(state='readonly' if enabled else tk.DISABLED)
+            # 只配置存在的控件
+            if hasattr(self, 'load_data_btn'):
+                self.load_data_btn.config(state=st)
             # Enable view buttons only if results exist and contain the relevant data
             st_view_plot = tk.NORMAL if enabled and self.backtest_plot_path else tk.DISABLED
             st_view_trades = tk.NORMAL if enabled and self.backtest_results and 'trades' in self.backtest_results and not self.backtest_results['trades'].empty else tk.DISABLED
@@ -391,11 +685,16 @@ class TradingAppGUI: # Renamed class for clarity
             self.view_plot_button.config(state=st_view_plot)
             self.view_trades_button.config(state=st_view_trades)
             self.view_order_log_button.config(state=st_view_order_log)
-            # Backtest param entries
-            for e in [self.capital_entry, self.size_frac_entry, self.leverage_entry, self.offset_entry]:
-                 if e and e.winfo_exists(): e.config(state=st)
+            # Backtest param entries - 直接配置已知存在的控件
+            try:
+                self.capital_entry.config(state=st)
+                self.leverage_entry.config(state=st)
+                self.offset_entry.config(state=st)
+            except (AttributeError, tk.TclError):
+                pass  # 忽略不存在的控件
             # Hide live controls
-            self.stop_button.config(state=tk.DISABLED)
+            if hasattr(self, 'stop_button'):
+                self.stop_button.config(state=tk.DISABLED)
 
 
         elif mode == 'live':
@@ -405,6 +704,24 @@ class TradingAppGUI: # Renamed class for clarity
             self.view_plot_button.config(state=tk.DISABLED)
             self.view_trades_button.config(state=tk.DISABLED) # Or adapt later
             self.view_order_log_button.config(state=tk.DISABLED) # Or adapt later
+
+        elif mode == 'trend_analysis':
+            # 走勢分析模式控件 - 使用新的N8N工作流按鈕
+            if hasattr(self, 'start_analysis_button'):
+                self.start_analysis_button.config(state=st)
+            # 禁用回測和實盤相關的按鈕
+            self.view_plot_button.config(state=tk.DISABLED)
+            self.view_trades_button.config(state=tk.DISABLED)
+            self.view_order_log_button.config(state=tk.DISABLED)
+            if hasattr(self, 'stop_button'):
+                self.stop_button.config(state=tk.DISABLED)
+            # 隱藏數據載入控件（N8N工作流不需要）
+            if hasattr(self, 'load_data_btn'):
+                self.load_data_btn.config(state=tk.DISABLED)
+            # 查看詳細分析按鈕 - 只有在有分析結果時才啟用
+            if hasattr(self, 'view_analysis_button'):
+                analysis_available = enabled and hasattr(self, 'trend_analysis_results') and self.trend_analysis_results is not None
+                self.view_analysis_button.config(state=tk.NORMAL if analysis_available else tk.DISABLED)
 
 
         # Toggle dynamic strategy param widgets
@@ -424,15 +741,23 @@ class TradingAppGUI: # Renamed class for clarity
 
         self.start_button.config(state=start_st)
         self.stop_button.config(state=stop_st)
-        self.exchange_combobox.config(state='readonly' if not trading else tk.DISABLED)
         self.strategy_combobox.config(state='readonly' if not trading else tk.DISABLED)
 
-        # Live param entries
-        for e in [self.live_symbol_entry, self.live_qty_entry]:
-             if e and e.winfo_exists(): e.config(state=param_st)
-        # Paper trading checkbox
-        cb = self.live_params_frame.winfo_children()[-1] # Assuming checkbox is last
-        if isinstance(cb, ttk.Checkbutton): cb.config(state=param_st)
+        # 只配置存在的實盤控件
+        try:
+            if hasattr(self, 'exchange_combobox'):
+                self.exchange_combobox.config(state='readonly' if not trading else tk.DISABLED)
+            if hasattr(self, 'live_symbol_entry'):
+                self.live_symbol_entry.config(state=param_st)
+            if hasattr(self, 'live_qty_entry'):
+                self.live_qty_entry.config(state=param_st)
+            # Paper trading checkbox - 安全地檢查
+            if hasattr(self, 'live_params_frame') and self.live_params_frame.winfo_children():
+                cb = self.live_params_frame.winfo_children()[-1]
+                if isinstance(cb, ttk.Checkbutton):
+                    cb.config(state=param_st)
+        except (AttributeError, tk.TclError):
+            pass  # 忽略不存在的控件
 
         # Strategy params
         for widget_tuple in self.current_param_widgets.values():
@@ -442,7 +767,7 @@ class TradingAppGUI: # Renamed class for clarity
                  else: widget.config(state=param_st)
 
 
-    def set_status(self, m): self.gui_queue.put(("status", m))
+    def set_status(self, m): self.gui_queue.put(("update_status", m))
     def show_message(self, l, t, m): self.gui_queue.put(("messagebox", (l, t, m)))
     def append_result(self, t): self.gui_queue.put(("result_append", t + "\n")) # Add newline for log clarity
     def clear_results(self):
@@ -468,52 +793,143 @@ class TradingAppGUI: # Renamed class for clarity
         except Exception as e: self.show_message("error","錯誤",f"加載數據列表出錯: {e}"); self.existing_data_combobox['values']=[]; self.existing_data_combobox.set('')
         print("<<< load_existing_data_files")
 
-    def download_data(self):
-        # (Unmodified - still downloads Binance data for backtesting)
-        sym=self.symbol_entry.get().replace('/','').upper(); s=self.start_entry.get(); e=self.end_entry.get()
-        interval = self.interval_combobox.get() # Get selected interval
-
-        if not sym: self.show_message("warning","輸入錯誤","請輸入交易對"); return
-        if not interval or interval not in self.valid_intervals: # Validate interval
-            self.show_message("warning", "輸入錯誤", "請選擇有效的時間框架"); return
-
+    def _prepare_data_thread(self, symbol, interval, start_date, end_date, monitor_queue):
+        """數據準備線程 - 檢查本地數據並下載缺失部分"""
         try:
-            sd=datetime.strptime(s,"%Y/%m/%d %H:%M"); ed=datetime.strptime(e,"%Y/%m/%d %H:%M")
-            if sd>=ed: self.show_message("warning","輸入錯誤","開始需早於結束"); return
-            fn=f"{sym}_{sd:%Y%m%d%H%M}_{ed:%Y%m%d%H%M}_{interval}.csv"; fp=os.path.join(self.data_path,fn)
-            self.gui_queue.put(("disable_controls",None)); self.gui_queue.put(("download_status",f"下載 {sym} ({interval})...")); self.set_status(f"下載 {sym} ({interval})...")
-            # --- Pass gui_queue to the download thread ---
-            threading.Thread(target=self._d_thread, args=(sym, interval, sd, ed, fp, self.gui_queue), daemon=True).start()
-        except ValueError: self.show_message("error","格式錯誤","時間格式需為 YYYY/MM/DD HH:MM")
-        except Exception as e: self.show_message("error","錯誤",f"準備下載時出錯: {e}"); self.gui_queue.put(("enable_controls",None)); self.gui_queue.put(("download_status","失敗")); self.set_status("下載失敗")
+            # 轉換日期為datetime對象
+            start_dt = datetime.combine(start_date, datetime.min.time())
+            end_dt = datetime.combine(end_date, datetime.max.time())
 
-    def _d_thread(self, sym, interval, sd, ed, fp, monitor_queue):
-        # --- Pass monitor_queue to fetch_historical_data ---
-        try:
-            if 'fetch_historical_data' not in globals(): raise RuntimeError("fetch func missing")
-            fetch_historical_data(
-                symbol=sym,
-                interval=interval,
-                start_time=int(sd.timestamp()*1000),
-                end_time=int(ed.timestamp()*1000),
-                output_path=fp,
-                monitor_queue=monitor_queue # Pass the queue here
-            )
-            # --- Success messages ---
-            self.gui_queue.put(("reload_data_files",None))
-            self.show_message("info","完成",f"下載至\n{fp}")
-            self.gui_queue.put(("download_status",f"{os.path.basename(fp)} 完成"))
-            self.set_status("下載完成")
+            # 檢查是否有現有數據文件
+            data_dir = os.path.join("data", "historical")
+            os.makedirs(data_dir, exist_ok=True)
+            data_file = os.path.join(data_dir, f"{symbol}_{interval}.csv")
+
+            if os.path.exists(data_file):
+                # 加載現有數據
+                existing_data = pd.read_csv(data_file, index_col=0, parse_dates=True)
+
+                # 檢查是否需要下載額外數據
+                need_download = False
+                if len(existing_data) > 0:
+                    existing_start = existing_data.index[0]
+                    existing_end = existing_data.index[-1]
+
+                    if start_dt < existing_start or end_dt > existing_end:
+                        need_download = True
+                        self.gui_queue.put(("update_status", f"現有數據範圍不足，需要下載完整數據"))
+                else:
+                    need_download = True
+                    self.gui_queue.put(("update_status", f"現有數據為空，需要下載完整數據"))
+            else:
+                need_download = True
+                self.gui_queue.put(("update_status", f"未找到現有數據文件，需要下載"))
+
+            # 如果需要，下載完整數據
+            if need_download:
+                from data.binance_utils import fetch_historical_data
+
+                self.gui_queue.put(("update_status", f"下載 {symbol} {interval} 數據: {start_dt.date()} 至 {end_dt.date()}"))
+
+                # 轉換為毫秒時間戳
+                start_timestamp = int(start_dt.timestamp() * 1000)
+                end_timestamp = int(end_dt.timestamp() * 1000)
+
+                # 下載數據
+                data = fetch_historical_data(
+                    symbol=symbol,
+                    interval=interval,
+                    start_time=start_timestamp,
+                    end_time=end_timestamp,
+                    output_path=data_file,
+                    monitor_queue=monitor_queue
+                )
+            else:
+                # 使用現有數據
+                data = existing_data
+                # 過濾日期範圍
+                data = data[(data.index >= start_dt) & (data.index <= end_dt)]
+
+            # 保存當前數據以供回測使用
+            if data is not None and len(data) > 0:
+                # 標準化列名（確保策略能正確識別）
+                column_mapping = {
+                    'open': 'Open',
+                    'high': 'High',
+                    'low': 'Low',
+                    'close': 'Close',
+                    'volume': 'Volume'
+                }
+                data = data.rename(columns=column_mapping)
+
+                # 確保必要的列存在
+                required_columns = ['Open', 'High', 'Low', 'Close']
+                missing_columns = [col for col in required_columns if col not in data.columns]
+                if missing_columns:
+                    self.gui_queue.put(("show_error", f"數據缺少必要列: {', '.join(missing_columns)}"))
+                    return
+
+                self.current_data = data
+                self.current_data_info = {
+                    'symbol': symbol,
+                    'interval': interval,
+                    'start_date': start_date,
+                    'end_date': end_date,
+                    'rows': len(data)
+                }
+            else:
+                self.gui_queue.put(("show_error", "數據下載失敗或數據為空"))
+                return
+
+            # 更新GUI
+            self.gui_queue.put(("enable_controls", None))
+            self.gui_queue.put(("update_data_status", f"已加載: {symbol} {interval}, {len(data)} 行"))
+            self.gui_queue.put(("update_progress", 100))  # 設置進度條為100%
+            self.set_status(f"已準備 {symbol} {interval} 數據，共 {len(data)} 行")
+
+            # 數據準備完成
+
         except Exception as e:
-            # --- Error messages (monitor queue already handled errors inside fetch_historical_data) ---
-            self.show_message("error","下載錯誤",f"下載 {sym} ({interval}) 最終失敗: {e}")
-            self.gui_queue.put(("download_status",f"{sym} ({interval}) 失敗"))
-            self.set_status(f"{sym} ({interval}) 下載失敗")
-            # Print traceback for debugging
+            self.gui_queue.put(("show_error", f"準備數據時出錯: {e}"))
+            self.gui_queue.put(("enable_controls", None))
+            self.gui_queue.put(("update_data_status", "準備失敗"))
+            self.gui_queue.put(("update_progress", 0))  # 重置進度條
+            self.set_status("數據準備失敗")
             traceback.print_exc()
-        finally:
-            # --- Always re-enable controls ---
-            self.gui_queue.put(("enable_controls",None))
+
+    def _monitor_data_preparation(self, monitor_queue):
+        """監控數據準備進度"""
+        while True:
+            try:
+                update = monitor_queue.get(timeout=0.5)
+                # 處理不同類型的更新消息
+                if isinstance(update, dict):
+                    status = update.get('status', '')
+                    progress = update.get('progress', 0)
+
+                    # 更新狀態文字
+                    if progress >= 0:
+                        self.gui_queue.put(("update_status", f"{status} ({progress}%)"))
+                        # 更新進度條
+                        self.gui_queue.put(("update_progress", progress))
+                    else:
+                        self.gui_queue.put(("update_status", status))
+                        # 重置進度條
+                        self.gui_queue.put(("update_progress", 0))
+
+                elif isinstance(update, str):
+                    # 處理字符串消息
+                    self.gui_queue.put(("update_status", update))
+
+                monitor_queue.task_done()
+            except queue.Empty:
+                # 檢查是否應該退出
+                if not any(t.name.startswith("Thread-") and t.is_alive() for t in threading.enumerate()):
+                    break
+                continue
+            except Exception as e:
+                print(f"監控線程錯誤: {e}")
+                break
 
     # --- *** MODIFIED: load_strategies accepts mode *** ---
     def load_strategies(self, live_mode=False):
@@ -631,7 +1047,7 @@ class TradingAppGUI: # Renamed class for clarity
                 else:
                      # Should not happen if UI is built correctly
                      print(f"警告: 參數 '{param_key}' 的控件類型未知: {type(widget)}")
-                     continue 
+                     continue
 
                 print(f"  '{param_key}' ({label_text}): Raw='{value_str}'")
                 value = None
@@ -704,30 +1120,50 @@ class TradingAppGUI: # Renamed class for clarity
         print("策略參數驗證完成。")
         return strategy_params
 
-    # --- Backtest Execution (Modified to use helper) ---
+    # --- Backtest Execution Methods ---
     def start_backtest(self):
+        """統一的啟動方法，根據模式調用相應的方法"""
+        mode = self.mode_var.get()
+        if mode == "backtest":
+            self.run_backtest()
+        elif mode == "live":
+            self.start_live_trading()
+        elif mode == "trend_analysis":
+            self.start_trend_analysis()
+        else:
+            self.show_message("error", "模式錯誤", f"未知的模式: {mode}")
+
+    def run_backtest(self):
+        """執行回測"""
+        # 檢查是否已加載數據
+        if not hasattr(self, 'current_data') or self.current_data is None or self.current_data.empty:
+            self.show_message("warning", "數據未準備", "請先加載數據")
+            return
+
+        # 獲取策略選擇
         sn = self.strategy_combobox.get()
-        if not sn: self.show_message("warning", "選擇錯誤", "請選擇策略"); return
+        if not sn:
+            self.show_message("warning", "選擇錯誤", "請選擇策略")
+            return
 
-        # --- Get Backtest Parameters ---
+        # 獲取策略類
+        sc = self.strategy_classes.get(sn)
+        if sc is None:
+            self.show_message("error", "策略錯誤", f"找不到策略類: {sn}")
+            return
+
+        # 獲取回測參數
         try:
-            cap = float(self.capital_entry.get())
-            # size_frac is now a strategy parameter, remove from here
-            # size_frac = float(self.size_frac_entry.get())
-            lev = float(self.leverage_entry.get())
-            offset_percent = float(self.offset_entry.get())
-            if not (cap > 0): raise ValueError("起始本金必須 > 0")
-            # if not (0 < size_frac <= 1): raise ValueError("投入淨值比例必須介於 0 和 1 之間 (不含 0)") # Moved to strategy params
-            if not (lev > 0): raise ValueError("槓桿倍數必須 > 0")
-            if not (offset_percent >= 0): raise ValueError("進場偏移百分比必須 >= 0")
-        except ValueError as e: self.show_message("warning", "回測參數錯誤", f"檢查回測參數:\n{e}"); return
-        except Exception as e: self.show_message("error", "參數讀取錯誤", f"讀取回測參數時發生未知錯誤:\n{e}"); traceback.print_exc(); return
+            cap = float(self.capital_var.get())
+            lev = float(self.leverage_var.get())
+            offset_percent = float(self.offset_var.get())
+        except ValueError as e:
+            self.show_message("error", "參數錯誤", f"無效的數值參數: {e}")
+            return
 
-        # --- Get Strategy Parameters using helper ---
+        # 獲取策略參數
         try:
             sp = self._get_validated_strategy_params()
-            sc = self.strategy_classes.get(sn) # Get strategy class
-            if not sc: raise RuntimeError(f"找不到策略類別: {sn}")
         except (ValueError, RuntimeError) as e:
             self.show_message("warning", "策略參數錯誤", f"檢查策略參數:\n{e}")
             return
@@ -736,93 +1172,80 @@ class TradingAppGUI: # Renamed class for clarity
             traceback.print_exc()
             return
 
-        # --- Get Data File ---
-        if self.data_source_var.get() == "existing":
-            cf = self.existing_data_combobox.get()
-            if not cf: self.show_message("warning","選擇錯誤","請選擇數據文件"); return
-            if not cf: self.show_message("warning", "選擇錯誤", "請選擇數據文件"); return
-            cp = os.path.join(self.data_path, cf)
-            if not os.path.exists(cp): self.show_message("error", "文件錯誤", f"數據文件不存在:\n{cp}"); return
-        else:
-            self.show_message("info", "提示", "請切換到 '使用現有數據' 並選擇已下載的文件。")
-            return
-
-        # --- Start Backtest Thread ---
+        # 開始回測
         self.gui_queue.put(("disable_controls", None))
         self.clear_results()
-        self.append_result(f"開始回測: {sn}\n數據: {os.path.basename(cp)}\n")
-        # Removed size_frac from backtest params log, it's now in strategy params
+        self.append_result(f"開始回測: {sn}\n數據: {self.current_data_info['symbol']} {self.current_data_info['interval']}, {self.current_data_info['rows']} 行\n")
         self.append_result(f"回測參數: 本金={cap:,.2f}, 槓桿={lev:.2f}x, 進場偏移={offset_percent:.2f}%\n")
         param_str = ", ".join(f"{k}={v}" for k, v in sp.items()) if sp else "無"
         self.append_result(f"策略參數: {param_str}\n")
         self.append_result("-" * 30)
         self.set_status(f"回測 {sn}...")
-        # Pass validated strategy params (sp) to the thread
-        threading.Thread(target=self._run_backtest_thread, args=(cp, sc, sp, cap, lev, offset_percent), daemon=True).start()
 
+        # 啟動回測線程
+        threading.Thread(
+            target=self._run_backtest_thread,
+            args=(self.current_data, sc, sp, cap, lev, offset_percent),
+            daemon=True
+        ).start()
 
-    # --- Backtest Thread (Renamed) ---
-    def _run_backtest_thread(self, csv_path, strategy_class, strategy_params, capital, leverage, offset_percent):
-        # (Logic remains the same as _run_thread in previous version)
+    def _run_backtest_thread(self, data, strategy_class, strategy_params, capital, leverage, offset_percent):
+        """回測執行線程"""
         try:
-            self.set_status("加載數據..."); data = None
-            try: # Data loading and preprocessing...
-                data = pd.read_csv(csv_path)
-                timestamp_col = None; common_ts = ['timestamp','open_time','Date','time','datetime']
-                for c in common_ts:
-                    if c in data.columns: timestamp_col = c; break
-                if timestamp_col is None: raise ValueError("找不到時間戳列 (例如 'timestamp', 'Date', 'open_time')")
-                try:
-                    if pd.api.types.is_numeric_dtype(data[timestamp_col]):
-                        if data[timestamp_col].max() > 2_000_000_000: data['ts_dt'] = pd.to_datetime(data[timestamp_col], unit='ms', utc=True, errors='coerce')
-                        else: data['ts_dt'] = pd.to_datetime(data[timestamp_col], unit='s', utc=True, errors='coerce')
-                    else: data['ts_dt'] = pd.to_datetime(data[timestamp_col], utc=True, errors='coerce')
-                except Exception as parse_err: raise ValueError(f"無法解析時間戳列 '{timestamp_col}': {parse_err}")
-                data.dropna(subset=['ts_dt'], inplace=True)
-                if data.empty: raise ValueError("數據中無有效時間戳")
-                data.set_index('ts_dt', inplace=True); data.sort_index(inplace=True)
-                if data.index.has_duplicates: print(f"警告: 數據索引中有 {data.index.duplicated().sum()} 個重複項，將保留第一個。"); data = data[~data.index.duplicated(keep='first')]
-                remap = {'open':'Open','high':'High','low':'Low','close':'Close','volume':'Volume','open_price':'Open','high_price':'High','low_price':'Low','close_price':'Close'}
-                data.columns = [remap.get(c.lower(), c) for c in data.columns]
-                req = ['Open','High','Low','Close']
-                missing_cols = [c for c in req if c not in data.columns]
-                if missing_cols: raise ValueError(f"數據缺少必要列: {', '.join(missing_cols)}")
-                for c in req + (['Volume'] if 'Volume' in data.columns else []):
-                    if c in data.columns: data[c] = pd.to_numeric(data[c], errors='coerce')
-                if 'Volume' not in data.columns: print("警告: 數據缺少 'Volume' 列，將以 0 填充。"); data['Volume'] = 0.0
-                else: vol_na_count = data['Volume'].isna().sum(); data['Volume'].fillna(0.0, inplace=True)
-                ohlc_na_count = data[req].isna().any(axis=1).sum()
-                if ohlc_na_count > 0: print(f"警告: OHLC 列有 {ohlc_na_count} 行包含缺失值，將被移除。"); data.dropna(subset=req, inplace=True)
-                data = data[req + ['Volume']]
-                if data.empty: raise ValueError("數據預處理後為空。")
-                print(f"數據加載完成. Shape: {data.shape}. 時間範圍: {data.index[0]} 到 {data.index[-1]}")
-            except Exception as e: print(f"數據處理錯誤: {e}"); self.show_message("error","數據錯誤",f"處理數據文件 '{os.path.basename(csv_path)}' 時出錯:\n{e}"); self.set_status("數據處理失敗"); self.gui_queue.put(("enable_controls",None)); traceback.print_exc(); return
-
             self.set_status("初始化回測引擎...")
-            engine = BacktestEngine(data=data, strategy_class=strategy_class, strategy_params=strategy_params, initial_capital=capital, leverage=leverage, offset_value=offset_percent) # Use offset_value, let offset_type/basis use defaults
+            engine = BacktestEngine(
+                data=data,
+                strategy_class=strategy_class,
+                strategy_params=strategy_params,
+                initial_capital=capital,
+                leverage=leverage,
+                offset_value=offset_percent
+            )
+
             self.set_status("執行回測...")
             engine.run()
+
             self.set_status("生成回測報告...")
             results = engine.get_analysis_results()
             self.backtest_results = results
+
+            # 顯示結果摘要
             pm = results.get('performance_metrics', {})
-            def get_m(k, f="{:.2f}"): v=pm.get(k); return 'N/A' if v is None or (isinstance(v,float) and pd.isna(v)) else (f.format(v) if isinstance(v,(int,float)) and f else str(v))
+            def get_m(k, f="{:.2f}"):
+                v = pm.get(k)
+                return 'N/A' if v is None or (isinstance(v, float) and pd.isna(v)) else (f.format(v) if isinstance(v, (int, float)) and f else str(v))
+
             self.append_result("--- 回測結果摘要 ---")
             self.append_result(f"  時間範圍: {get_m('Start','{}')} - {get_m('End','{}')} ({get_m('Duration','{}')})")
-            self.append_result(f"  最終權益: {get_m('Equity Final [$]','{:,.2f}')} (峰值: {get_m('Equity Peak [$]','{:,.2f}')})")
-            self.append_result(f"  總收益率: {get_m('Return [%]')}% (年化: {get_m('Return (Ann.) [%]')}%)\n  買入持有收益率: {get_m('Buy & Hold Return [%]')}%")
-            self.append_result(f"  最大回撤: {get_m('Max. Drawdown [%]')}% (平均: {get_m('Avg. Drawdown [%]')}%)\n  夏普比率: {get_m('Sharpe Ratio')} | 索提諾比率: {get_m('Sortino Ratio')}")
-            self.append_result(f"  交易次數: {get_m('# Trades','{}')} | 勝率: {get_m('Win Rate [%]')}% | 盈虧比: {get_m('Profit Factor')}")
-            self.append_result(f"  平均交易收益: {get_m('Avg. Trade [%]')}% (最佳: {get_m('Best Trade [%]')}% / 最差: {get_m('Worst Trade [%]')}%)\n" + "-" * 25)
-            self.set_status("生成回測圖表...")
+            self.append_result(f"  總回報: {get_m('Return [%]')}%")
+            self.append_result(f"  年化回報: {get_m('Return (Ann.) [%]')}%")
+            self.append_result(f"  夏普比率: {get_m('Sharpe Ratio')}")
+            self.append_result(f"  最大回撤: {get_m('Max. Drawdown [%]')}%")
+            self.append_result(f"  勝率: {get_m('Win Rate [%]')}%")
+            self.append_result(f"  交易次數: {get_m('# Trades', '{:.0f}')}")
+
+            # 生成圖表
             base_strategy_name = getattr(strategy_class, '__name__', 'UnknownStrategy')
             plot_filename = f"plots/{base_strategy_name}_{datetime.now():%Y%m%d_%H%M%S}.html"
             plot_path = engine.generate_plot(filename=plot_filename)
-            if plot_path: self.backtest_plot_path = plot_path; self.append_result(f"圖表已保存至: {os.path.basename(plot_path)}"); self.set_status("回測完成 (含圖表)")
-            else: self.append_result("\n錯誤：生成回測圖表失敗。"); self.set_status("回測完成 (圖表生成失敗)")
-        except (FileNotFoundError, ValueError, RuntimeError) as e: self.show_message("error","回測錯誤",str(e)); self.set_status("回測失敗"); self.append_result(f"\n錯誤: {e}"); traceback.print_exc(); self.backtest_results = {'_order_log': engine.order_log if 'engine' in locals() else []}; self.backtest_plot_path = None
-        except Exception as e: error_details=traceback.format_exc(); self.show_message("error","未知錯誤",f"回測過程中發生未預期的錯誤: {e}\n詳情請查看控制台輸出。"); self.set_status("回測異常終止"); self.append_result(f"\n未知錯誤: {e}\n{error_details}"); print(f"--- 未知回測錯誤 ---\n{error_details}"); self.backtest_results = {'_order_log': engine.order_log if 'engine' in locals() else []}; self.backtest_plot_path = None
-        finally: self.gui_queue.put(("enable_controls", None))
+
+            if plot_path:
+                self.backtest_plot_path = plot_path
+                self.append_result(f"圖表已保存至: {os.path.basename(plot_path)}")
+                self.set_status("回測完成 (含圖表)")
+            else:
+                self.append_result("\n錯誤：生成回測圖表失敗。")
+                self.set_status("回測完成 (圖表生成失敗)")
+
+        except Exception as e:
+            self.show_message("error", "回測錯誤", str(e))
+            self.set_status("回測失敗")
+            self.append_result(f"\n錯誤: {e}")
+            traceback.print_exc()
+            self.backtest_results = {'_order_log': engine.order_log if 'engine' in locals() else []}
+            self.backtest_plot_path = None
+        finally:
+            self.gui_queue.put(("enable_controls", None))
 
 
     # --- *** NEW Methods for Live Trading *** ---
@@ -926,7 +1349,7 @@ class TradingAppGUI: # Renamed class for clarity
         if self.live_trader_instance:
             try:
                 # Request stop via the instance method
-                self.live_trader_instance.stop() 
+                self.live_trader_instance.stop()
                 # Wait for the trader thread to finish (with a timeout)
                 if hasattr(self, 'live_trader_thread') and self.live_trader_thread.is_alive():
                      print("等待實盤交易線程結束...")
@@ -1050,6 +1473,361 @@ class TradingAppGUI: # Renamed class for clarity
             log_tree.insert("", tk.END, values=formatted_row)
         self.set_status("已顯示訂單日誌窗口")
 
+    # --- 走勢分析方法 ---
+    def start_trend_analysis(self):
+        """開始走勢分析 - 完全按照N8N工作流邏輯"""
+        try:
+            # 獲取幣種名稱或交易對
+            symbol_input = self.symbol_entry.get().strip().upper()
+            trading_pair_input = self.trading_pair_entry.get().strip().upper()
+
+            # 確定最終的交易對
+            if trading_pair_input:
+                # 如果用戶輸入了完整交易對，直接使用
+                final_symbol = trading_pair_input
+                self.append_result(f"✅ 使用完整交易對: {final_symbol}")
+            elif symbol_input:
+                # 如果用戶只輸入了幣種名稱，自動轉換為USDT交易對
+                final_symbol = f"{symbol_input}USDT"
+                self.append_result(f"✅ 自動轉換交易對: {symbol_input} → {final_symbol}")
+            else:
+                self.show_message("warning", "輸入缺失", "請輸入幣種名稱或完整交易對")
+                return
+
+            # 檢查Google API設置
+            api_key = self.google_api_key_entry.get().strip()
+
+            # 檢查是否使用測試模式
+            if api_key.lower() == "test":
+                self.append_result("🧪 使用測試模式進行分析")
+                api_key = "test"
+            else:
+                # 如果沒有API密鑰，嘗試從環境變數讀取
+                if not api_key:
+                    import os
+                    from dotenv import load_dotenv
+                    load_dotenv()
+                    api_key = os.environ.get("GOOGLE_API_KEY", "")
+                    if api_key:
+                        self.append_result(f"✅ 使用環境變數中的API密鑰: {api_key[:10]}...")
+                    else:
+                        self.append_result("❌ 未找到API密鑰")
+
+            # 檢查是否有有效的配置
+            if not api_key:
+                self.append_result("❌ 未找到任何有效的Google AI配置")
+                self.append_result("請檢查以下選項：")
+                self.append_result("1. 在API密鑰欄位輸入您的Google API密鑰")
+                self.append_result("2. 或者輸入 'test' 使用測試模式")
+                self.append_result("3. 或者確認.env文件中的GOOGLE_API_KEY設置正確")
+                self.show_message("warning", "配置缺失",
+                                "未找到Google AI配置。\n\n請：\n1. 輸入API密鑰，或\n2. 輸入 'test' 使用測試模式，或\n3. 檢查.env文件配置")
+                return
+
+            # 獲取分析詳細程度
+            detail_level = self.analysis_detail_var.get()
+
+            # 清除結果並開始分析
+            self.clear_results()
+            self.append_result("🚀 開始N8N工作流分析")
+            self.append_result(f"交易對: {final_symbol}")
+            self.append_result(f"分析詳細程度: {detail_level}")
+            self.append_result("自動獲取多時間框架數據: 15m, 1h, 1d")
+            self.append_result("-" * 40)
+            self.set_status("正在進行專業走勢分析...")
+
+            # 禁用控件
+            self.start_analysis_button.config(state=tk.DISABLED)
+
+            # 啟動分析線程 - 使用N8N工作流邏輯
+            threading.Thread(
+                target=self._run_n8n_analysis_thread,
+                args=(final_symbol, api_key, detail_level),
+                daemon=True
+            ).start()
+
+        except Exception as e:
+            self.show_message("error", "分析啟動失敗", f"啟動走勢分析時發生錯誤: {str(e)}")
+            self.set_status("走勢分析啟動失敗")
+            if hasattr(self, 'start_analysis_button'):
+                self.start_analysis_button.config(state=tk.NORMAL)
+
+    def _run_n8n_analysis_thread(self, symbol, api_key, detail_level):
+        """N8N工作流分析執行線程 - 完全按照N8N邏輯"""
+        try:
+            from analysis.trend_analyzer import TrendAnalyzer
+
+            self.set_status("初始化N8N工作流分析器...")
+            analyzer = TrendAnalyzer(api_key=api_key)
+
+            self.set_status("正在執行N8N工作流分析...")
+            self.append_result("正在調用Google Gemini AI進行專業分析...")
+
+            # 執行N8N工作流分析 - 不需要預先加載的數據
+            analysis_result = analyzer.analyze_trend(
+                data=None,  # N8N工作流會自動獲取數據
+                symbol=symbol,
+                timeframe="多時間框架",  # N8N工作流使用多時間框架
+                detail_level=detail_level
+            )
+
+            # 儲存結果
+            self.trend_analysis_results = analysis_result
+
+            # 顯示結果
+            self.append_result("--- N8N工作流分析結果 ---")
+            self.append_result(f"分析時間: {analysis_result['generated_at']}")
+            self.append_result(f"分析狀態: {analysis_result.get('status', '未知')}")
+            if 'word_count' in analysis_result:
+                self.append_result(f"分析字數: {analysis_result['word_count']} 字")
+            self.append_result("-" * 40)
+
+            # 在主結果區域顯示簡要信息
+            preview_text = analysis_result['analysis_text'][:200] + "..." if len(analysis_result['analysis_text']) > 200 else analysis_result['analysis_text']
+            self.append_result(f"分析預覽: {preview_text}")
+            self.append_result("-" * 40)
+            self.append_result("✅ 專業分析完成！點擊 '查看詳細分析' 按鈕查看完整報告")
+
+            # 顯示詳細結果窗口
+            self._show_trend_analysis_result_window(analysis_result)
+
+            # 啟用查看詳細分析按鈕
+            if hasattr(self, 'view_analysis_button'):
+                self.view_analysis_button.config(state=tk.NORMAL)
+
+            self.set_status("N8N工作流分析完成")
+
+        except ImportError as e:
+            self.append_result(f"錯誤: 無法導入分析模組 - {str(e)}")
+            self.set_status("分析失敗: 模組導入錯誤")
+        except Exception as e:
+            self.append_result(f"分析過程中發生錯誤: {str(e)}")
+            self.set_status("N8N工作流分析失敗")
+            import traceback
+            traceback.print_exc()
+        finally:
+            # 重新啟用控件
+            if hasattr(self, 'start_analysis_button'):
+                self.gui_queue.put(("enable_controls", None))
+
+    def _run_trend_analysis_thread(self, data, api_key, project_id, detail_level):
+        """走勢分析執行線程"""
+        try:
+            from analysis.trend_analyzer import TrendAnalyzer
+
+            self.set_status("初始化分析器...")
+            analyzer = TrendAnalyzer(api_key=api_key, project_id=project_id)
+
+            # 從數據信息中提取符號和時間框架
+            symbol = self.current_data_info.get('symbol', 'Unknown')
+            timeframe = self.current_data_info.get('interval', 'Unknown')
+
+            self.set_status("正在分析走勢...")
+            self.append_result("正在調用Google Gemini AI進行分析...")
+
+            # 執行分析
+            analysis_result = analyzer.analyze_trend(data, symbol, timeframe, detail_level)
+
+            # 儲存結果
+            self.trend_analysis_results = analysis_result
+
+            # 顯示結果
+            self.append_result("--- 走勢分析結果 ---")
+            self.append_result(f"分析時間: {analysis_result['generated_at']}")
+            self.append_result(f"分析狀態: {analysis_result.get('status', '未知')}")
+            if 'word_count' in analysis_result:
+                self.append_result(f"分析字數: {analysis_result['word_count']} 字")
+            self.append_result("-" * 30)
+
+            # 在主結果區域顯示簡要信息
+            preview_text = analysis_result['analysis_text'][:200] + "..." if len(analysis_result['analysis_text']) > 200 else analysis_result['analysis_text']
+            self.append_result(f"分析預覽: {preview_text}")
+            self.append_result("-" * 30)
+            self.append_result("✅ 分析完成！點擊 '查看詳細分析' 按鈕查看完整報告")
+
+            # 顯示詳細結果窗口
+            self._show_trend_analysis_result_window(analysis_result)
+
+            # 啟用查看詳細分析按鈕
+            if hasattr(self, 'view_analysis_button'):
+                self.view_analysis_button.config(state=tk.NORMAL)
+
+            self.set_status("走勢分析完成")
+
+        except ImportError as e:
+            self.append_result(f"錯誤: 無法導入分析模組 - {str(e)}")
+            self.set_status("分析失敗: 模組導入錯誤")
+        except Exception as e:
+            self.append_result(f"分析過程中發生錯誤: {str(e)}")
+            self.set_status("走勢分析失敗")
+            import traceback
+            traceback.print_exc()
+        finally:
+            # 重新啟用控件
+            self.gui_queue.put(("enable_start_button", None))
+
+    def view_last_analysis(self):
+        """查看最後一次的走勢分析結果"""
+        if not self.trend_analysis_results:
+            self.show_message("info", "無分析結果", "尚未執行走勢分析，或上次分析失敗。")
+            return
+
+        # 顯示最後一次的分析結果
+        self._show_trend_analysis_result_window(self.trend_analysis_results)
+
+    def _show_trend_analysis_result_window(self, analysis_result):
+        """顯示走勢分析結果的專門窗口"""
+        try:
+            # 創建新窗口
+            result_window = tk.Toplevel(self.master)
+            result_window.title(f"走勢分析報告 - {analysis_result.get('symbol', '未知')} {analysis_result.get('timeframe', '')}")
+            result_window.geometry("900x700")
+            result_window.resizable(True, True)
+
+            # 創建主框架
+            main_frame = ttk.Frame(result_window)
+            main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+            # 頂部信息框架
+            info_frame = ttk.LabelFrame(main_frame, text="分析信息")
+            info_frame.pack(fill=tk.X, pady=(0, 10))
+
+            # 分析信息
+            info_text = f"""
+分析時間: {analysis_result.get('generated_at', '未知')}
+交易對: {analysis_result.get('symbol', '未知')}
+時間框架: {analysis_result.get('timeframe', '未知')}
+分析狀態: {analysis_result.get('status', '未知')}
+分析字數: {analysis_result.get('word_count', 0)} 字
+"""
+            info_label = ttk.Label(info_frame, text=info_text.strip(), font=('Arial', 10))
+            info_label.pack(anchor='w', padx=10, pady=5)
+
+            # 分析結果框架
+            result_frame = ttk.LabelFrame(main_frame, text="詳細分析報告")
+            result_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+
+            # 創建文本框和滾動條
+            text_frame = ttk.Frame(result_frame)
+            text_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+            # 文本框
+            result_text = tk.Text(text_frame, wrap=tk.WORD, font=('Microsoft JhengHei', 11),
+                                bg='white', fg='black', relief=tk.FLAT, bd=1)
+            result_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+            # 垂直滾動條
+            v_scrollbar = ttk.Scrollbar(text_frame, orient=tk.VERTICAL, command=result_text.yview)
+            v_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+            result_text.config(yscrollcommand=v_scrollbar.set)
+
+            # 水平滾動條
+            h_scrollbar = ttk.Scrollbar(result_frame, orient=tk.HORIZONTAL, command=result_text.xview)
+            h_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
+            result_text.config(xscrollcommand=h_scrollbar.set)
+
+            # 插入分析結果
+            analysis_text = analysis_result.get('analysis_text', '無分析結果')
+            result_text.insert(tk.END, analysis_text)
+            result_text.config(state=tk.DISABLED)  # 設為只讀
+
+            # 按鈕框架
+            button_frame = ttk.Frame(main_frame)
+            button_frame.pack(fill=tk.X)
+
+            # 保存按鈕
+            save_button = ttk.Button(button_frame, text="保存報告",
+                                   command=lambda: self._save_analysis_report(analysis_result))
+            save_button.pack(side=tk.LEFT, padx=(0, 10))
+
+            # 複製按鈕
+            copy_button = ttk.Button(button_frame, text="複製到剪貼板",
+                                   command=lambda: self._copy_to_clipboard(analysis_text))
+            copy_button.pack(side=tk.LEFT, padx=(0, 10))
+
+            # 關閉按鈕
+            close_button = ttk.Button(button_frame, text="關閉", command=result_window.destroy)
+            close_button.pack(side=tk.RIGHT)
+
+            # 設置窗口圖標和焦點
+            result_window.focus_set()
+
+            print("走勢分析結果窗口已顯示")
+
+        except Exception as e:
+            print(f"顯示結果窗口時發生錯誤: {e}")
+            import traceback
+            traceback.print_exc()
+            self.show_message("error", "顯示錯誤", f"無法顯示分析結果窗口: {str(e)}")
+
+    def _save_analysis_report(self, analysis_result):
+        """保存分析報告到文件"""
+        try:
+            from tkinter import filedialog
+
+            # 生成默認文件名
+            symbol = analysis_result.get('symbol', 'Unknown')
+            timeframe = analysis_result.get('timeframe', 'Unknown')
+            timestamp = analysis_result.get('generated_at', datetime.now().strftime("%Y%m%d_%H%M%S"))
+            timestamp_clean = timestamp.replace(':', '').replace('-', '').replace(' ', '_')
+
+            default_filename = f"走勢分析_{symbol}_{timeframe}_{timestamp_clean}.txt"
+
+            # 選擇保存位置
+            file_path = filedialog.asksaveasfilename(
+                title="保存走勢分析報告",
+                defaultextension=".txt",
+                initialname=default_filename,
+                filetypes=[
+                    ("文本文件", "*.txt"),
+                    ("Markdown文件", "*.md"),
+                    ("所有文件", "*.*")
+                ]
+            )
+
+            if file_path:
+                # 準備報告內容
+                report_content = f"""# 走勢分析報告
+
+## 基本信息
+- 分析時間: {analysis_result.get('generated_at', '未知')}
+- 交易對: {analysis_result.get('symbol', '未知')}
+- 時間框架: {analysis_result.get('timeframe', '未知')}
+- 分析狀態: {analysis_result.get('status', '未知')}
+- 分析字數: {analysis_result.get('word_count', 0)} 字
+
+## 詳細分析
+
+{analysis_result.get('analysis_text', '無分析結果')}
+
+---
+報告生成時間: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+生成工具: 加密貨幣交易系統 - 走勢分析模組
+"""
+
+                # 保存文件
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write(report_content)
+
+                self.show_message("info", "保存成功", f"分析報告已保存至:\n{file_path}")
+                print(f"分析報告已保存: {file_path}")
+
+        except Exception as e:
+            print(f"保存報告時發生錯誤: {e}")
+            self.show_message("error", "保存失敗", f"無法保存分析報告: {str(e)}")
+
+    def _copy_to_clipboard(self, text):
+        """複製文本到剪貼板"""
+        try:
+            self.master.clipboard_clear()
+            self.master.clipboard_append(text)
+            self.master.update()  # 確保剪貼板更新
+            self.show_message("info", "複製成功", "分析結果已複製到剪貼板")
+            print("分析結果已複製到剪貼板")
+        except Exception as e:
+            print(f"複製到剪貼板時發生錯誤: {e}")
+            self.show_message("error", "複製失敗", f"無法複製到剪貼板: {str(e)}")
+
 # --- Main Entry Point ---
 if __name__ == "__main__":
     print("初始化 GUI...")
@@ -1061,6 +1839,11 @@ if __name__ == "__main__":
     # except ImportError:
     #     print("ttkthemes 未安裝, 使用默認 Tk 主題。")
     #     pass # Use standard tk.Tk
+
+    class TradingAppGUI:
+        def __init__(self, master):
+            self.master = master
+            # 初始化所有GUI組件
 
     app = TradingAppGUI(root) # Use renamed class
     root.mainloop()

@@ -37,11 +37,11 @@ class RsiEmaStrategy(Strategy):
 
     # --- Default values ---
     rsi_length = 14
-    ema_length = 200
-    rsi_long_entry = 20.0
-    rsi_long_exit = 50.0
-    rsi_short_entry = 80.0
-    rsi_short_exit = 50.0
+    ema_length = 50  # 使用較短的EMA，更敏感
+    rsi_long_entry = 30.0  # RSI超賣區域
+    rsi_long_exit = 70.0   # RSI超買區域
+    rsi_short_entry = 70.0 # RSI超買區域
+    rsi_short_exit = 30.0  # RSI超賣區域
     size_frac = 0.1
 
     # --- Internal ---
@@ -127,13 +127,17 @@ class RsiEmaStrategy(Strategy):
             size_value = self.size_frac
             if not (0 < size_value < 1): size_value = 0.1 # Default safety check
 
-            long_entry_condition = current_rsi < self.rsi_long_entry and current_close > current_ema
+            # 修改策略邏輯：更實用的RSI均值回歸策略
+            # 多單：RSI超賣時買入（不考慮EMA，純粹的均值回歸）
+            long_entry_condition = current_rsi < self.rsi_long_entry
             long_exit_condition = current_rsi > self.rsi_long_exit
-            short_entry_condition = current_rsi > self.rsi_short_entry and current_close < current_ema
+
+            # 空單：RSI超買時賣出（不考慮EMA，純粹的均值回歸）
+            short_entry_condition = current_rsi > self.rsi_short_entry
             short_exit_condition = current_rsi < self.rsi_short_exit
 
             # --- Long Logic ---
-            # Entry Condition: RSI < entry threshold AND Close > EMA
+            # Entry Condition: RSI < entry threshold (超賣買入)
             if long_entry_condition:
                 if not self.position.is_long:
                     # Close any existing short position before entering long
@@ -145,18 +149,18 @@ class RsiEmaStrategy(Strategy):
                     tag = f"L_{self.order_id_counter}"
                     # Note: No SL/TP defined in the request, placing market order
                     self.buy(size=size_value, tag=tag)
-                    print(f"Bar {current_bar_idx}: Entered Long (RSI: {current_rsi:.2f} < {self.rsi_long_entry}, Close: {current_close:.2f} > EMA: {current_ema:.2f}) Tag: {tag}")
+                    print(f"Bar {current_bar_idx}: Entered Long (RSI: {current_rsi:.2f} < {self.rsi_long_entry}) Tag: {tag}")
 
-            # Exit Condition: RSI > exit threshold
-            elif long_exit_condition:
+            # Exit Condition: RSI > exit threshold (超買賣出) - 改為獨立的if
+            if long_exit_condition:
                 if self.position.is_long:
                     self.position.close()
                     print(f"Bar {current_bar_idx}: Closed Long (Reason: RSI {current_rsi:.2f} > {self.rsi_long_exit})")
 
 
             # --- Short Logic ---
-            # Entry Condition: RSI > entry threshold AND Close < EMA
-            elif short_entry_condition:
+            # Entry Condition: RSI > entry threshold (超買賣出)
+            if short_entry_condition:
                  if not self.position.is_short:
                     # Close any existing long position before entering short
                     if self.position.is_long:
@@ -167,10 +171,10 @@ class RsiEmaStrategy(Strategy):
                     tag = f"S_{self.order_id_counter}"
                     # Note: No SL/TP defined in the request, placing market order
                     self.sell(size=size_value, tag=tag)
-                    print(f"Bar {current_bar_idx}: Entered Short (RSI: {current_rsi:.2f} > {self.rsi_short_entry}, Close: {current_close:.2f} < EMA: {current_ema:.2f}) Tag: {tag}")
+                    print(f"Bar {current_bar_idx}: Entered Short (RSI: {current_rsi:.2f} > {self.rsi_short_entry}) Tag: {tag}")
 
-            # Exit Condition: RSI < exit threshold
-            elif short_exit_condition:
+            # Exit Condition: RSI < exit threshold (超賣平倉) - 改為獨立的if
+            if short_exit_condition:
                 if self.position.is_short:
                     self.position.close()
                     print(f"Bar {current_bar_idx}: Closed Short (Reason: RSI {current_rsi:.2f} < {self.rsi_short_exit})")

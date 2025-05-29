@@ -36,7 +36,7 @@ class BrownianMotionStrategy(Strategy):
     """
     # --- Parameter Definition for GUI ---
     _params_def = {
-        'entry_probability': ('開單機率 (0-1)', float, 0.5, (0.01, 1.0)), # 每 5 分鐘觸發時的開單機率
+        'entry_probability': ('開單機率 (0-1)', float, 0.8, (0.01, 1.0)), # 每 5 分鐘觸發時的開單機率
         'brownian_volatility': ('布朗運動波動率', float, 0.03, (0.001, 0.1)), # 模擬價格變動的波動率
         'brownian_dt': ('布朗運動時間步長 (秒)', int, 1, (1, 60)), # 模擬的時間步長
         'atr_length':       ('ATR 長度 (用於止損)', int, 14, (2, 100)),      # ATR 週期
@@ -49,7 +49,7 @@ class BrownianMotionStrategy(Strategy):
     }
 
     # --- Default values ---
-    entry_probability = 0.5
+    entry_probability = 0.8  # 增加開單機率，讓回測更容易產生交易
     brownian_volatility = 0.03
     brownian_dt = 1 # 1 second dt for simulation step
     atr_length = 14
@@ -114,14 +114,16 @@ class BrownianMotionStrategy(Strategy):
 
         current_timestamp = self.data.index[-1] # pandas Timestamp
 
-        # --- 頻率控制：每 5 分鐘檢查一次 ---
+        # --- 頻率控制：每 5 分鐘檢查一次 (調整為更靈活的檢查) ---
         if self.last_check_time is None:
             self.last_check_time = current_timestamp
-            return # 第一次運行，僅記錄時間
-
-        time_diff = current_timestamp - self.last_check_time
-        if time_diff < timedelta(minutes=5):
-            return # 未到 5 分鐘，跳過
+            # 第一次運行時也可以考慮開單
+        else:
+            time_diff = current_timestamp - self.last_check_time
+            # 對於回測，放寬時間限制，允許更頻繁的檢查
+            min_interval = timedelta(minutes=1)  # 改為1分鐘，更適合回測
+            if time_diff < min_interval:
+                return # 未到最小間隔，跳過
 
         # 更新上次檢查時間
         self.last_check_time = current_timestamp

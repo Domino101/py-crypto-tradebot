@@ -313,7 +313,19 @@ class BacktestEngine:
             output_dir = os.path.dirname(filename)
             if output_dir and not os.path.exists(output_dir):
                 os.makedirs(output_dir)
-            self.bt.plot(filename=filename, open_browser=False, plot_trades=plot_trades)
+
+            # Try to plot with different options to handle upsampling issues
+            try:
+                self.bt.plot(filename=filename, open_browser=False, plot_trades=plot_trades)
+            except ValueError as ve:
+                if "Upsampling not supported" in str(ve):
+                    print("BacktestEngine: Upsampling error, trying without superimpose...")
+                    # Try with minimal plotting options
+                    self.bt.plot(filename=filename, open_browser=False, plot_trades=False,
+                               plot_volume=False, plot_pl=False)
+                else:
+                    raise ve
+
             abs_path = os.path.abspath(filename)
             print(f"BacktestEngine: Plot saved successfully to {abs_path}")
             return abs_path

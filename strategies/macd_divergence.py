@@ -218,7 +218,19 @@ class MacdDivergenceStrategy(Strategy):
                 short_sl = ref_high_band; short_tp = ref_low_band; long_sl = ref_low_band; long_tp = ref_high_band
                 # Calculate order size based on fixed cash value
                 if entry_limit <= 0: return # Avoid division by zero or negative price
-                order_size = self.order_cash_value / entry_limit
+
+                # Get current equity from backtesting framework
+                try:
+                    current_equity = self._broker.equity  # Access current equity
+                    if current_equity <= 0:
+                        current_equity = 10000  # Fallback to initial capital
+                except:
+                    current_equity = 10000  # Fallback if equity access fails
+
+                # Calculate as fraction of current equity
+                equity_fraction = self.order_cash_value / current_equity
+                order_size = min(0.95, max(0.01, equity_fraction))  # Clamp between 1% and 95%
+
                 if order_size <= 0: return # Ensure positive order size
 
                 # Use limit orders to match Pine Script behavior
